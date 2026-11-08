@@ -21,6 +21,52 @@ Istruzioni per l'agente AI:
 
 ### Added
 
+- **Fundamentals freshness gate (P0 FRESH-001).** New deterministic module
+  (`tradingagents/dataflows/fundamentals_freshness.py`) compares the fiscal
+  period a fundamentals report used against the latest authoritative filing
+  *known at the analysis date* — never the latest record a vendor serves.
+  A company release and a SEC filing are distinct dated sources; a filing
+  dated after the analysis date is invisible (no look-ahead). A stale
+  period (`STALE_CRITICAL`) or an undatable one (`UNAVAILABLE`) blocks the
+  decision through the Execution Gate with `FUNDAMENTALS_STALE` /
+  `FUNDAMENTALS_UNAVAILABLE`, and the verdict lands in the audit's
+  `data_quality` section.
+- **Cross-agent fact registry (P0 FACT-002).** New deterministic module
+  (`tradingagents/dataflows/fact_registry.py`) registers each agent's
+  material facts with scope (period, segment, unit, currency) and detects
+  incompatible assertions about the same scoped fact. Absence of vendor
+  data is recorded as `NOT_REPORTED`, never as a zero: "no buyback
+  reported" cannot refute a sourced amount. A conflict is resolved only by
+  a verified primary source (company release / SEC filing); without one it
+  stays unresolved and blocks the decision. Segment scoping keeps
+  consolidated figures apart from subsidiary ones.
+- **Arithmetic & signal validator (P0 MATH-005, ENTRY-007).** New
+  deterministic module (`tradingagents/dataflows/signal_validator.py`):
+  open-to-close and close-to-close returns are computed and labelled
+  separately (the 2026-11-05 session's -2.04% open→close vs -1.17%
+  close→close are no longer one number), a stated move matching neither is
+  an error naming both true values, `SignalTrigger` separates the candle
+  that fires a condition from the first orderable session (no retroactive
+  orders), and `validate_stop_side` requires the stop to sit on the
+  protective side of the entry for the position's direction (LONG below,
+  SHORT above).
+- **P0 gates wired into the decision point.**
+  `gate_integration.evaluate_decision` accepts the freshness inputs, a fact
+  registry report and the position direction; stale fundamentals, an
+  unresolved material conflict or a wrong-side stop each BLOCK with stable
+  reason codes, and the audit JSON carries the new verdicts under
+  `data_quality`.
+
+### Changed
+
+- **Fail-closed on invalid data-quality inputs.** A plan whose stop sits on
+  the wrong side of the entry, whose fundamentals are stale or undatable,
+  or whose material facts conflict without a verified primary source is
+  recorded as BLOCK with zero orders — the strategic rating is unchanged
+  and still reported.
+
+### Added
+
 - **Instrument Profiler.** A vendor-data-driven instrument classifier
   (`tradingagents/dataflows/instrument_profiler.py`) so the reliability
   layers behave uniformly for any instrument — US mega-caps, dual-class
