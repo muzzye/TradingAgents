@@ -9,6 +9,10 @@ from tradingagents.agents.tools import (
     get_income_statement,
     get_insider_transactions,
 )
+from tradingagents.dataflows.data_availability import (
+    PeriodAvailability,
+    render_availability_block,
+)
 
 # The tools this analyst is offered; its tool node is built from the same tuple.
 TOOLS = (
@@ -20,16 +24,49 @@ TOOLS = (
 )
 
 
+def _availability_block(state, current_date: str) -> str:
+    """The deterministic data-availability block for this run's prompt.
+
+    Reads the state's ``data_availability`` key — a list of
+    ``(period, period_end, release_date, filing_date)`` tuples the graph
+    setup fills from the vendors' dated evidence. Absent or empty, the block
+    says so explicitly: the analyst must not claim any period is published.
+    """
+    raw = state.get("data_availability") or []
+    periods = [
+        PeriodAvailability(
+            period=item[0],
+            period_end=item[1] if len(item) > 1 else None,
+            release_date=item[2] if len(item) > 2 else None,
+            filing_date=item[3] if len(item) > 3 else None,
+        )
+        for item in raw
+        if isinstance(item, (tuple, list)) and item
+    ]
+    if not periods:
+        return (
+            "\n\n## Data availability\n"
+            "No dated period-availability information was provided for this run. "
+            "Do not state that any fiscal period's figures are published or "
+            "filed; describe only what your tools actually returned, with the "
+            "period each figure belongs to."
+        )
+    return "\n\n" + render_availability_block(periods, current_date)
+
+
 def create_fundamentals_analyst(llm):
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
         instrument_context = get_instrument_context_from_state(state)
+
+        availability_block = _availability_block(state, current_date)
 
         system_message = (
             "You are a researcher tasked with analyzing fundamental information over the past week about a company. Please write a comprehensive report of the company's fundamental information such as financial documents, company profile, basic company financials, and company financial history to gain a full view of the company's fundamental information to inform traders. Make sure to include as much detail as possible. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + " Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."
             + " Use the available tools: `get_fundamentals` for comprehensive company analysis, `get_balance_sheet`, `get_cashflow`, and `get_income_statement` for specific financial statements, and `get_insider_transactions` for recent insider buying and selling."
             + get_language_instruction()
+            + availability_block
         )
 
         prompt = ChatPromptTemplate.from_messages(

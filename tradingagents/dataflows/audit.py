@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from tradingagents.dataflows.causal_guard import CausalVerdict
+from tradingagents.dataflows.cross_agent import ConsistencyVerdict
 from tradingagents.dataflows.execution_gate import ExecutionAction, GateDecision
 from tradingagents.dataflows.fact_checker import FactCheckReport
 from tradingagents.dataflows.portfolio_decision import StrategicDecision
@@ -60,6 +61,8 @@ class AuditRecord:
     gate: GateDecision | None = None
     strategic: StrategicDecision | None = None
     fact_check: FactCheckReport | None = None
+    # Cross-agent consistency verdict (None when the check did not run).
+    consistency: ConsistencyVerdict | None = None
 
     # Market snapshot as validated (None fields stay None: never invented).
     session_date: str | None = None
@@ -166,10 +169,14 @@ class AuditRecord:
     def _data_quality_entry(self) -> dict:
         prov = self.provenance
         fc = self.fact_check
-        if prov is None and fc is None:
+        consistency = self.consistency
+        if prov is None and fc is None and consistency is None:
             return {"status": None, "blocking_claims": []}
         blocking = fc.blocking_claim_ids if fc else []
-        if blocking:
+        consistency_errors = (
+            consistency.error_codes if consistency is not None else ()
+        )
+        if blocking or consistency_errors:
             status = "BLOCKED_BY_CLAIMS"
         elif prov and prov.blocking_fact_ids():
             status = "REQUIRES_RECONCILIATION"
@@ -179,7 +186,10 @@ class AuditRecord:
             "status": status,
             "provenance_summary": prov.summary() if prov else None,
             "fact_check_summary": fc.summary() if fc else None,
-            "blocking_claims": blocking,
+            "cross_agent_consistency": (
+                consistency.summary() if consistency is not None else None
+            ),
+            "blocking_claims": list(blocking) + list(consistency_errors),
         }
 
     def to_json(self, *, indent: int = 2) -> str:

@@ -44,6 +44,38 @@ def _seven_days_back(trade_date: str) -> str:
     return (datetime.strptime(trade_date, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
 
 
+def _causal_block(state) -> str:
+    """The temporal-consistency block from the run's causal-guard verdict.
+
+    The graph setup computes the verdict when the run knows an event and a
+    trading calendar; the state carries it under ``post_event_status``. When
+    absent, the block says the causal question is open — the analyst must
+    not assume either way.
+    """
+    status = state.get("post_event_status")
+    if status == "NOT_YET_OBSERVABLE":
+        return (
+            "**No post-event session has traded yet.** The most recent event's "
+            "publication date falls after the last completed market session, so "
+            "the market's reaction to it is NOT YET OBSERVABLE as of "
+            f"{state.get('trade_date', 'today')}. Any claim that the market has "
+            "already reacted to, absorbed, priced in or discounted that event is "
+            "temporally false and must not appear in this report."
+        )
+    if status == "OBSERVABLE":
+        return (
+            "**At least one post-event session has traded.** The market's "
+            "reaction to the most recent event is observable; ground any "
+            "reaction claim in the actual post-event price data, not in "
+            "expectation."
+        )
+    return (
+        "No causal verdict is available for this run: do not claim the market "
+        "has reacted to a recent event unless your sources show a completed "
+        "trading session after the event's publication date."
+    )
+
+
 def create_sentiment_analyst(llm):
     """Create a sentiment analyst node for the trading graph.
 
@@ -83,6 +115,7 @@ def create_sentiment_analyst(llm):
             stocktwits_block=stocktwits_block,
             reddit_block=reddit_block,
             subreddits=subreddits,
+            causal_block=_causal_block(state),
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -136,6 +169,7 @@ def _build_system_message(
     stocktwits_block: str,
     reddit_block: str,
     subreddits: tuple[str, ...] = DEFAULT_SUBREDDITS,
+    causal_block: str = "",
 ) -> str:
     """Assemble the sentiment-analyst system message with structured data blocks."""
     if subreddits == DEFAULT_SUBREDDITS:
@@ -186,6 +220,12 @@ Community discussion, without vote or comment counts. Subreddit character matter
 7. **Identify catalysts and risks** that emerge across sources — news of upcoming earnings, product launches, competitive threats, macro headlines, etc.
 
 8. **Past sentiment is not predictive.** Frame your conclusions as signal for the trader to weigh alongside fundamentals and technicals, not as a price call.
+
+## Temporal consistency (binding)
+
+{causal_block}
+
+9. **Never claim the market has already reacted to an event that no session has traded since.** If the temporal-consistency block above says no post-event session exists, then any statement that the market "has absorbed", "priced in", "reacted to" or "discounted" the event is false as of today — write instead that the reaction is *not yet observable* and will only be measurable after the next session. Sentiment describes positioning and expectations, not a market reaction that has not had the chance to happen.
 
 ## Output fields
 

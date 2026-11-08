@@ -18,6 +18,7 @@ class Propagator:
         past_context: str = "",
         instrument_context: str = "",
         portfolio_context: str = "",
+        post_event_status: str = "",
     ) -> dict[str, Any]:
         """Create the initial state for the agent graph.
 
@@ -25,7 +26,9 @@ class Propagator:
         resolved once at run start (see
         ``TradingAgentsGraph.resolve_instrument_context``). When empty, agents
         fall back to ticker-only context via
-        ``get_instrument_context_from_state``.
+        ``get_instrument_context_from_state``. ``post_event_status`` is the
+        causal guard's verdict computed once at run start; empty when no
+        event is known or the verdict could not be resolved.
         """
         return {
             "messages": [("human", company_name)],
@@ -36,6 +39,7 @@ class Propagator:
             "past_context": past_context,
             "memory_note": "",
             "portfolio_context": portfolio_context,
+            "post_event_status": post_event_status,
             "investment_debate_state": InvestDebateState(
                 {
                     "bull_history": "",

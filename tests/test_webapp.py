@@ -226,7 +226,7 @@ class _FakeGraph:
             "final_trade_decision": "- **Rating**: Buy\n\nAdd on weakness.",
         }
 
-    def record_decision(self, ticker, trade_date, final_state):
+    def record_decision(self, ticker, trade_date, final_state, portfolio=None):
         self.saved["decision"] = (ticker, trade_date)
 
     def clear_checkpoint_on_success(self, *args, **kwargs):
@@ -589,7 +589,6 @@ class TestBacktestApi:
 
     def test_a_second_sweep_while_one_runs_is_refused(self, monkeypatch, tmp_path):
         import tradingagents.backtest as backtest_module
-        import webapp.backtest_service as backtest_service
 
         gate = threading.Event()
 

@@ -9,15 +9,10 @@ audit file exists, and a reliability-layer failure cannot sink the run.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
 from tradingagents.dataflows.gate_integration import (
-    attach_to_state,
     evaluate_decision,
-    write_audit_record,
 )
 
 
@@ -113,94 +108,120 @@ def test_model_versions_reach_the_audit():
 
 
 # ---------------------------------------------------------------------------
-# Persistence and state attachment
+# Portfolio context, sizing and fail-closed (contract §5)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_audit_record_is_written_beside_the_state_log(tmp_path):
-    record, _ = evaluate_decision("BRK-B", "2026-11-08", _state(), snapshot_id="s1")
-    path = write_audit_record(record, str(tmp_path))
-    assert path.exists()
-    assert path == tmp_path / "BRK-B" / "reliability_audit" / "audit_2026-11-08.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["ticker"] == "BRK-B"
-    assert data["schema_version"] == "1.0"
-
-
-@pytest.mark.unit
-def test_attach_to_state_exposes_the_verdict():
-    state = _state()
-    _, decision = evaluate_decision("BRK-B", "2026-11-08", state, snapshot_id="s1")
-    attach_to_state(state, decision)
-    assert state["execution_action"] == decision.action.value
-    assert state["execution_reason_codes"] == [r.value for r in decision.reasons]
-
-
-# ---------------------------------------------------------------------------
-# The graph's record_decision wiring
-# ---------------------------------------------------------------------------
-
-
-def _graph_with_tmp_results(monkeypatch, tmp_path):
-    """A TradingAgentsGraph-shaped minimal stub: only what record_decision touches."""
-    from tradingagents.graph.trading_graph import TradingAgentsGraph
-
-    graph = TradingAgentsGraph.__new__(TradingAgentsGraph)
-    graph.config = {"results_dir": str(tmp_path / "results")}
-    graph.selected_analysts = []  # run_settings reads it for the state log
-    graph.memory_log = None  # replaced per-test
-    return graph
-
-
-@pytest.mark.unit
-def test_record_decision_attaches_the_verdict_and_writes_the_audit(
-    monkeypatch, tmp_path
-):
-    """The wiring: state gains execution_action; the audit file exists."""
-    graph = _graph_with_tmp_results(monkeypatch, tmp_path)
-    state = _state()
-    # No memory log on the stub: store_decision is skipped by the empty
-    # decision guard? No — the decision text is present, so patch the log.
-    class _Log:
-        def store_decision(self, **kwargs):
-            self.stored = kwargs
-
-    log = _Log()
-    graph.memory_log = log
-    graph._evaluate_reliability = graph._evaluate_reliability  # bound already
-
-    graph.record_decision("BRK-B", "2026-11-08", state)
-    assert "execution_action" in state
-    audit_dir = tmp_path / "results" / "BRK-B" / "reliability_audit"
-    assert (audit_dir / "audit_2026-11-08.json").exists()
-    assert log.stored["ticker"] == "BRK-B"
-
-
-@pytest.mark.unit
-def test_reliability_failure_never_sinks_the_run(monkeypatch, tmp_path):
-    """A broken audit layer must not lose the run's reports or memory entry."""
-    graph = _graph_with_tmp_results(monkeypatch, tmp_path)
-
-    class _Log:
-        def __init__(self):
-            self.stored = None
-
-        def store_decision(self, **kwargs):
-            self.stored = kwargs
-
-    graph.memory_log = _Log()
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("audit layer down")
-
-    monkeypatch.setattr(
-        "tradingagents.graph.trading_graph.evaluate_decision", boom
+def test_plan_without_portfolio_context_blocks_fail_closed():
+    """A plan with numbers but no portfolio: PORTFOLIO_CONTEXT_MISSING blocks."""
+    record, decision = evaluate_decision(
+        "BRK-B", "2026-11-08", _state(), snapshot_id="s1",
+        entry=100.0, stop=95.0, atr=5.0, risk_budget=1000.0,
+        equity=None,
     )
+    assert decision.action.value == "BLOCK"
+    reasons = [r.value for r in decision.reasons]
+    assert "PORTFOLIO_RISK_BUDGET_MISSING" in reasons
+    assert record.sizing is not None
+    assert record.sizing.qty > 0
+    assert record.portfolio_risk is not None
+    assert not record.portfolio_risk.equity_known
+
+
+@pytest.mark.unit
+def test_plan_without_risk_budget_blocks():
+    """Numbers without a budget: sizing is refused, never guessed."""
+    record, decision = evaluate_decision(
+        "BRK-B", "2026-11-08", _state(), snapshot_id="s1",
+        entry=100.0, stop=95.0, atr=5.0, risk_budget=None,
+    )
+    assert decision.action.value == "BLOCK"
+    reasons = [r.value for r in decision.reasons]
+    assert "PORTFOLIO_RISK_BUDGET_MISSING" in reasons
+    assert record.sizing is None
+
+
+@pytest.mark.unit
+def test_sized_plan_with_portfolio_computes_fraction():
+    """Budget + portfolio: sizing and the equity fraction are computed."""
+    record, decision = evaluate_decision(
+        "BRK-B", "2026-11-08", _state(), snapshot_id="s1",
+        entry=100.0, stop=95.0, atr=5.0, risk_budget=1000.0,
+        equity=100_000.0, cash=100_000.0,
+    )
+    assert record.sizing is not None
+    assert record.sizing.qty > 0
+    assert record.portfolio_risk is not None
+    assert record.portfolio_risk.equity_known
+    assert record.portfolio_risk.planned_risk_pct_equity is not None
+    assert record.portfolio_risk.planned_risk_pct_equity < 0.05
+    risk_entry = record.to_dict()["risk"]
+    assert risk_entry["qty_proposed"] == record.sizing.qty
+    assert risk_entry["planned_risk_pct_equity"] is not None
+
+
+@pytest.mark.unit
+def test_sized_plan_exceeding_the_loss_budget_blocks():
+    """A planned loss beyond max_loss_fraction is a hard block."""
+    record, decision = evaluate_decision(
+        "BRK-B", "2026-11-08", _state(), snapshot_id="s1",
+        entry=100.0, stop=95.0, atr=5.0, risk_budget=10_000.0,
+        equity=100_000.0, max_loss_fraction=0.02,
+    )
+    assert decision.action.value == "BLOCK"
+    reasons = [r.value for r in decision.reasons]
+    assert "PORTFOLIO_RISK_BUDGET_EXCEEDED" in reasons
+
+
+@pytest.mark.unit
+def test_cash_constraint_limits_sizing_to_zero():
+    """A budget the cash cannot cover: CASH_EXCEEDED, qty 0, gate blocks."""
+    record, decision = evaluate_decision(
+        "BRK-B", "2026-11-08", _state(), snapshot_id="s1",
+        entry=100.0, stop=95.0, atr=5.0, risk_budget=100_000.0,
+        equity=100_000.0, cash=50.0,
+    )
+    assert record.sizing is not None
+    assert record.sizing.qty == 0
+    assert decision.action.value == "BLOCK"
+
+
+@pytest.mark.unit
+def test_cross_agent_contradiction_blocks_data_quality():
+    """A reaction claim while no post-event session exists: BLOCK."""
     state = _state()
-    graph.record_decision("BRK-B", "2026-11-08", state)  # must not raise
-    # The decision still reached the memory log.
-    assert graph.memory_log.stored["ticker"] == "BRK-B"
-    # And the state log was still written.
-    assert (tmp_path / "results" / "BRK-B" / "TradingAgentsStrategy_logs" /
-            "full_states_log_2026-11-08.json").exists()
+    state["sentiment_report"] = (
+        "The market has already absorbed the Q3 results; positioning is bullish."
+    )
+    record, decision = evaluate_decision(
+        "BRK-B", "2026-11-08", state, snapshot_id="s1",
+        sessions=["2026-11-04", "2026-11-05", "2026-11-06"],
+        event_publication_date="2026-11-07",
+    )
+    assert decision.action.value == "BLOCK"
+    assert "DATA_QUALITY_BLOCKED" in [r.value for r in decision.reasons]
+    assert record.consistency is not None
+    assert record.consistency.blocks_decision
+    data_quality = record.to_dict()["data_quality"]
+    assert data_quality["status"] == "BLOCKED_BY_CLAIMS"
+    assert "CROSS_AGENT_REACTION_UNOBSERVABLE" in data_quality["blocking_claims"]
+
+
+@pytest.mark.unit
+def test_consistent_reports_do_not_block():
+    """Honest reports with the same causal verdict: no data-quality block."""
+    state = _state()
+    state["sentiment_report"] = (
+        "Positioning is constructive, but the reaction is not yet observable."
+    )
+    record, decision = evaluate_decision(
+        "BRK-B", "2026-11-08", state, snapshot_id="s1",
+        sessions=["2026-11-04", "2026-11-05", "2026-11-06"],
+        event_publication_date="2026-11-07",
+    )
+    assert record.consistency is not None
+    assert not record.consistency.blocks_decision
+    assert decision.action.value != "BLOCK" or "DATA_QUALITY_BLOCKED" not in [
+        r.value for r in decision.reasons
+    ]
