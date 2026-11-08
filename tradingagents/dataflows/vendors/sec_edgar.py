@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+# The filer's submission history: every filing, including the 8-K releases
+# that announce results without tagging them in XBRL. The freshness gate
+# needs this to see a period that is public but not yet restated.
+_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 
 # A filing history only changes when something new is filed, so one fetch per
 # company per day serves every date a run asks about.
