@@ -1,0 +1,1 @@
+curl -i http://localhost:4000/v1/chat/completions -H "Authorization: Bearer sk-aZIYI-uPmSVKAh9YhbL_xw" -H "Content-Type: application/json" -d '{"model":"smart-router","messages":[{"role":"user","content":"Design a multi-tenant microservices architecture with queues, cache and failover, and implement a rate limiter"}]}'

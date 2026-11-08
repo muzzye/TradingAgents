@@ -356,6 +356,22 @@ Istruzioni per l'agente AI:
   live state and report writer without changing them, binds to loopback only,
   and reuses the same `results_dir` artifacts a CLI run produces.
 
+### Fixed
+
+- The fundamentals freshness check reads a filer's SEC submission history, not
+  only its tagged XBRL figures, so a period that has been *announced* but not
+  yet restated is still recognised. Previously the check saw nothing after the
+  last tagged period and could call an old quarter current. Period filings and
+  results announcements are now distinct: an 8-K (item 2.02) announces a period
+  without stating one, so its `reportDate` — the *event* date — is never read as
+  a fiscal period end, and Form 4 ownership rows are no longer mistaken for
+  period filings. An announcement marks an older period stale only when it falls
+  after the end of the following quarter, a date on which it cannot be that
+  period's own release; on real Berkshire filings the Q2 8-K of 2026-08-11 is
+  correctly seen as Q2's own release rather than later news. Verified against
+  the live submission endpoint: as of 2026-11-08 no post-Q2 announcement exists,
+  so the gate reports Q2 as current. Tests: `tests/test_filing_release_dates.py`.
+
 ## [0.7.1] — 2026-10-27
 
 Decisions are scored only on final closes and settle across long market holidays, a model's unpadded date no longer reads filings made after the run date, and fixes to portfolios, prices, SEC statements, reports, Azure and Claude settings.
