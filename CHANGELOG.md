@@ -21,6 +21,33 @@ Istruzioni per l'agente AI:
 
 ### Added
 
+- **P0 regression gates for the 18:53 report.** New deterministic module
+  (`tradingagents/dataflows/regression_gates.py`) closing the defects of
+  the BRK-B report of 2026-11-08 18:53:34, ticker-agnostic with stable
+  reason codes: `INVALID_EVENT_CAUSALITY` (a reaction claim dated on or
+  before the event, or on a session that never traded — weekend, holiday,
+  after-hours publication), `STALE_FUNDAMENTALS` / `FUNDAMENTALS_UNAVAILABLE`
+  (the used period is older than the latest filing known at the analysis
+  date, with a conservative publication lag so a period end is never
+  treated as its own publication date), `FACT_CONFLICT_UNRESOLVED`
+  (same-scope metric assertions disagree without a verified primary; an
+  absence never refutes a sourced value), `EPS_DEFINITION_MISMATCH` (a
+  consensus/estimate EPS compared against an actual of another definition
+  is never a certifiable "beat"; EPS-family disagreements are never
+  auto-resolved by source rank), `UNRECONCILED_VALUATION` (P/B only from
+  aligned periods, share classes and currencies), `INVALID_TREND_COMPARISON`
+  (TTM vs FY vs YTD vs quarterly are not comparable for a trend; the
+  claimed direction must agree with the data), `EXPOSURE_CAP_EXCEEDED`
+  (sizing applies the stop-distance budget AND the per-symbol notional cap
+  simultaneously and reports which bound), `AGGREGATE_RISK_EXCEEDED`
+  (tranche + open-position risk and notional against the aggregate
+  budgets; a proposed stop move never reduces computed risk until
+  registered), and `INVALID_ENTRY_CONDITION` (mutually exclusive or not
+  yet observable entry conditions; a close-based trigger cannot authorize
+  an order at that same candle's price).
+
+### Added
+
 - **Instrument Profiler.** A vendor-data-driven instrument classifier
   (`tradingagents/dataflows/instrument_profiler.py`) so the reliability
   layers behave uniformly for any instrument — US mega-caps, dual-class
