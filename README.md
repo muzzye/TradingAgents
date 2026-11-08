@@ -356,6 +356,7 @@ from tradingagents.portfolio import PortfolioContext
 portfolio = PortfolioContext.model_validate({
     "cash": 25000.0,
     "currency": "USD",
+    "equity": 100000.0,
     "positions": [{"ticker": "NVDA", "quantity": 120, "average_price": 150.0}],
 })
 _, decision = ta.propagate("NVDA", "2026-09-01", portfolio=portfolio)
@@ -364,6 +365,13 @@ _, decision = ta.propagate("NVDA", "2026-09-01", portfolio=portfolio)
 The CLI takes the same content as a JSON file: `tradingagents --portfolio my_book.json`.
 
 An empty `positions` list means a flat book, which is different from passing nothing. A run without a portfolio is never treated as flat.
+
+`equity` is the account's total value and is what deterministic sizing is based
+on: the configured `risk_per_trade_pct` (1% by default) and `max_symbol_exposure`
+(5% by default) are fractions of it. It is deliberately separate from `cash` —
+"how much is free to deploy" and "how large the account is" are different facts.
+Without `equity` no exposure cap can be computed, so the risk engine refuses to
+size and the decision is blocked rather than given an invented quantity.
 
 ## Persistence and Recovery
 

@@ -35,6 +35,16 @@ class PortfolioContext(BaseModel):
 
     cash: float | None = Field(default=None, description="Free cash available")
     currency: str | None = Field(default=None, description="Currency label for cash and prices")
+    equity: float | None = Field(
+        default=None,
+        description=(
+            "Total account equity: the base a per-symbol exposure cap and a "
+            "risk budget are fractions OF. Optional and deliberately separate "
+            "from cash — 'how much is free to deploy' and 'how large the "
+            "account is' are different facts. Without it no exposure cap can "
+            "be computed, and the engine refuses to size rather than guessing."
+        ),
+    )
     positions: list[Position] = Field(default_factory=list)
 
     def positions_in(self, ticker: str) -> list[Position]:

@@ -66,6 +66,7 @@ class AuditRecord:
     # P0.5 exposure-capped sizing (None when the plan had no numbers or no
     # risk budget — the sizing is skipped, never guessed).
     exposure_sizing: object | None = None
+    aggregate_risk: object | None = None
     # P0-D structured execution verdict: the machine-readable answer to
     # "may the desk act now, and if not, exactly why".
     execution_verdict: object | None = None
@@ -165,6 +166,7 @@ class AuditRecord:
         sizing = self.sizing
         portfolio = self.portfolio_risk
         exposure = self.exposure_sizing
+        aggregate = self.aggregate_risk
         return {
             "stop_model": "VALIDATED" if (stop and not stop.blocked) else "UNVALIDATED",
             "stop_atr_multiple": stop.atr_multiple if stop else None,
@@ -186,6 +188,21 @@ class AuditRecord:
             ),
             "exposure_cap_applied": (
                 exposure.exposure_cap_applied if exposure else None
+            ),
+            # P0-C multi-tranche aggregation: every leg priced on its own
+            # stop, and the aggregate budget across all of them plus the
+            # position already held. Absent when the plan stated no leg.
+            "aggregate_tranches": (
+                [t.summary() for t in aggregate.tranches] if aggregate else None
+            ),
+            "aggregate_total_qty": aggregate.total_qty if aggregate else None,
+            "aggregate_total_notional": (
+                aggregate.total_notional if aggregate else None
+            ),
+            "aggregate_total_risk": aggregate.total_risk if aggregate else None,
+            "aggregate_blocked": aggregate.blocked if aggregate else None,
+            "aggregate_reasons": (
+                list(aggregate.reasons) if aggregate else None
             ),
         }
 

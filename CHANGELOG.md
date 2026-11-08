@@ -356,6 +356,26 @@ Istruzioni per l'agente AI:
   live state and report writer without changing them, binds to loopback only,
   and reuses the same `results_dir` artifacts a CLI run produces.
 
+### Fixed
+
+- Multi-leg plans are actually priced by the aggregate risk engine, which
+  existed and was tested but was never called from a real run. A plan that
+  stages its entry in two legs is now read from its own labelled lines
+  (`Tranche 1: entry … stop …`), each leg priced on its own stop, and the
+  aggregate risk and per-symbol exposure budgets enforced across all legs plus
+  the position already held. A single-leg plan is the degenerate case of the
+  same path, so nothing is special-cased; prose that states a weight but no
+  price per leg yields no invented leg. The result lands in the audit under
+  `risk.aggregate_*`.
+- Deterministic sizing now runs from the caller's book: `PortfolioContext`
+  gains an optional `equity`, and `record_decision` derives the risk budget
+  from it (`risk_per_trade_pct`, 1% by default) and applies
+  `max_symbol_exposure` (5% by default) through the CLI, the web console and
+  `propagate` alike. `equity` is kept separate from `cash` — the base an
+  exposure cap is a fraction of is not the free balance. Without `equity` the
+  engine refuses to size instead of guessing, so an unknown book stays unknown
+  rather than becoming flat.
+
 ## [0.7.1] — 2026-10-27
 
 Decisions are scored only on final closes and settle across long market holidays, a model's unpadded date no longer reads filings made after the run date, and fixes to portfolios, prices, SEC statements, reports, Azure and Claude settings.
