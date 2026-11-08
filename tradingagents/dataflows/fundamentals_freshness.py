@@ -25,6 +25,7 @@ reports which.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -238,3 +239,45 @@ def filings_from_sec_edgar(ticker: str, as_of_date: str) -> list[FilingRecord]:
         )
         for end, meta in sorted(earliest.items())
     ]
+
+
+# A period end appears in vendor output as an ISO date (2026-06-30) or as a
+# quarter label (2026-Q2, Q2 2026). The regexes are structural: any ticker's
+# report, no per-ticker rules.
+_ISO_PERIOD_END = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+_QUARTER_LABEL = re.compile(r"\b(\d{4})-Q([1-4])\b|\bQ([1-4])\s+(\d{4})\b")
+
+
+def _quarter_end(year: int, quarter: int) -> str:
+    """The calendar quarter end for a (year, quarter) pair."""
+    end_month = {1: 3, 2: 6, 3: 9, 4: 12}[quarter]
+    end_day = {3: 31, 6: 30, 9: 30, 12: 31}[end_month]
+    return f"{year:04d}-{end_month:02d}-{end_day:02d}"
+
+
+def used_period_end_from_report(report: str | None) -> str | None:
+    """The period end a fundamentals report actually leaned on, or None.
+
+    Reads the report text the run itself produced: the latest ISO date or
+    quarter label it names as a period. Deterministic and conservative —
+    an undatable report returns None, which the freshness gate treats as
+    UNAVAILABLE rather than guessing a period. Dates that look like
+    retrieval stamps (the analysis date itself) are not excluded here: the
+    gate compares against the latest known filing, so a report naming only
+    the run date reads as using that period, which a stale filing then
+    correctly flags.
+    """
+    if not report:
+        return None
+    candidates: list[str] = []
+    for match in _ISO_PERIOD_END.finditer(report):
+        candidates.append(match.group(1))
+    for match in _QUARTER_LABEL.finditer(report):
+        if match.group(2):
+            candidates.append(_quarter_end(int(match.group(1)), int(match.group(2))))
+        else:
+            candidates.append(_quarter_end(int(match.group(4)), int(match.group(3))))
+    if not candidates:
+        return None
+    # The freshest period named is the one the report presents as current.
+    return max(candidates)

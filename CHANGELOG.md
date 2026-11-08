@@ -56,6 +56,14 @@ Istruzioni per l'agente AI:
   unresolved material conflict or a wrong-side stop each BLOCK with stable
   reason codes, and the audit JSON carries the new verdicts under
   `data_quality`.
+- **Fundamentals freshness runs automatically.**
+  `TradingAgentsGraph.record_decision` now extracts the filings known at
+  the analysis date from SEC EDGAR (point-in-time, no look-ahead) and the
+  period the analyst used from the run's own fundamentals report, so the
+  freshness gate needs no explicit caller parameters. A non-US filer or an
+  unreachable SEC degrades to `UNAVAILABLE` (fail-closed, still BLOCK);
+  an extraction failure never skips the gate nor sinks the run. The gate
+  can be disabled with `fundamentals_freshness_gate: false` in config.
 
 ### Changed
 
