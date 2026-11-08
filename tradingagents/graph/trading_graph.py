@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 import tradingagents
 from tradingagents.agents.context import build_instrument_context, resolve_instrument_identity
 from tradingagents.agents.rating import run_rating
@@ -31,6 +33,57 @@ from .propagation import Propagator
 from .setup import GraphSetup
 
 logger = logging.getLogger(__name__)
+
+# The state keys carrying the analysts' reports, in a stable order for the
+# consistency check. A report the run did not produce is simply absent.
+_REPORT_KEYS = ("market_report", "sentiment_report", "news_report",
+                "fundamentals_report")
+
+
+def _run_reports(final_state: dict) -> dict[str, str] | None:
+    """The run's analyst reports, for the cross-agent consistency check.
+
+    Returns None when the state carries no reports at all — the check needs
+    something to compare and invents nothing.
+    """
+    reports: dict[str, str] = {}
+    for key in _REPORT_KEYS:
+        value = final_state.get(key)
+        if isinstance(value, str) and value.strip():
+            reports[key] = value
+    return reports or None
+
+
+def _portfolio_risk_context(portfolio) -> tuple[float | None, float | None, float | None]:
+    """The (equity, cash, max_loss_fraction) the risk engine needs.
+
+    Equity is cash plus positions valued at their average price — the only
+    valuation the portfolio context itself guarantees; marking to market is
+    the execution layer's job, not the audit's guess. A portfolio without
+    positions still yields its cash as equity. ``max_loss_fraction`` comes
+    from config when set; None keeps the check to context presence only.
+    """
+    if portfolio is None:
+        return None, None, None
+    try:
+        cash = float(portfolio.cash)
+    except (TypeError, ValueError):
+        return None, None, None
+    equity = cash
+    for position in getattr(portfolio, "positions", []) or []:
+        try:
+            equity += float(position.quantity) * float(position.average_price)
+        except (TypeError, ValueError):
+            continue
+    max_loss = None
+    try:
+        from tradingagents.dataflows.config import get_config
+        configured = get_config().get("max_portfolio_loss_fraction")
+        if configured is not None:
+            max_loss = float(configured)
+    except Exception:  # noqa: BLE001 — config is optional here
+        pass
+    return equity, cash, max_loss
 
 
 def _validate_trade_date(trade_date) -> str:
@@ -318,7 +371,39 @@ class TradingAgentsGraph:
             asset_type=asset_type,
             instrument_context=self.resolve_instrument_context(company_name, asset_type, trade_date),
             portfolio_context=portfolio.render(company_name) if portfolio is not None else "",
+            post_event_status=self._resolve_post_event_status(company_name, trade_date),
         )
+
+    def _resolve_post_event_status(self, ticker: str, trade_date: str) -> str:
+        """The causal guard's verdict for the run's most recent known event.
+
+        The event date comes from config (``event_publication_date``) when the
+        caller knows one; the calendar comes from the price series the run
+        will itself cite. Best-effort: no event known, no prices served, or a
+        vendor error all leave the status empty — the analysts then see the
+        "no causal verdict" guidance instead of a fabricated one.
+        """
+        event_date = self.config.get("event_publication_date")
+        if not event_date:
+            return ""
+        try:
+            from tradingagents.dataflows.causal_guard import evaluate_post_event_pricing
+            from tradingagents.dataflows.vendors.yahoo.ohlcv import load_ohlcv
+
+            frame = load_ohlcv(ticker, trade_date, fill_gaps=False)
+            sessions = (
+                [d.strftime("%Y-%m-%d") for d in pd.to_datetime(frame["Date"]).dt.date]
+                if frame is not None and "Date" in frame.columns and not frame.empty
+                else []
+            )
+            verdict = evaluate_post_event_pricing(
+                event_date, sessions, as_of_date=trade_date
+            )
+            return verdict.status
+        except Exception:  # noqa: BLE001 — a causal verdict must never sink the run
+            logger.debug("Could not resolve post-event status for %s on %s",
+                         ticker, trade_date, exc_info=True)
+            return ""
 
     def _memory_step(self, state):
         """The graph's Memory Log step, alongside the analysts (#1428): settle every
@@ -370,11 +455,18 @@ class TradingAgentsGraph:
         with run_config(self.config):
             return settlement.settle_all_pending(self.memory_log, self.reflector, self.config, wait=wait)
 
-    def record_decision(self, company_name, trade_date, final_state):
+    def record_decision(self, company_name, trade_date, final_state, portfolio=None):
         """Record a finished run: its state log, and its decision in the memory log
-        for reflection on the next same-ticker run. propagate() and the CLI both end here."""
+        for reflection on the next same-ticker run. propagate() and the CLI both end here.
+
+        ``portfolio`` is the run's portfolio context: it feeds the reliability
+        evaluation so sizing and the portfolio-risk check run against the real
+        base (contract §5). Without it the gate sees PORTFOLIO_CONTEXT_MISSING
+        when a plan exists — fail-closed, never sized against an unknown book.
+        """
         self._log_state(trade_date, final_state)
-        self._evaluate_reliability(company_name, trade_date, final_state)
+        self._evaluate_reliability(company_name, trade_date, final_state,
+                                   portfolio=portfolio)
         decision = final_state.get("final_trade_decision")
         if not decision:
             logger.warning("No final decision for %s on %s; nothing added to the memory log",
@@ -385,7 +477,7 @@ class TradingAgentsGraph:
             rating=run_rating(final_state),
         )
 
-    def _evaluate_reliability(self, company_name, trade_date, final_state):
+    def _evaluate_reliability(self, company_name, trade_date, final_state, portfolio=None):
         """Run the decision through the Execution Gate and write the audit.
 
         Best-effort by design: a reliability-layer failure must not lose the
@@ -394,6 +486,7 @@ class TradingAgentsGraph:
         and the audit JSON lands beside the state log.
         """
         try:
+            equity, cash, max_loss = _portfolio_risk_context(portfolio)
             record, decision = evaluate_decision(
                 company_name, trade_date, final_state,
                 snapshot_id=f"{company_name}-{trade_date}",
@@ -401,6 +494,10 @@ class TradingAgentsGraph:
                     "deep": self.config.get("deep_think_llm"),
                     "quick": self.config.get("quick_think_llm"),
                 },
+                reports=_run_reports(final_state),
+                equity=equity,
+                cash=cash,
+                max_loss_fraction=max_loss,
             )
             attach_to_state(final_state, decision)
             path = write_audit_record(record, self.config["results_dir"])
@@ -437,7 +534,7 @@ class TradingAgentsGraph:
         else:
             final_state = self.graph.invoke(graph_input, **args)
 
-        self.record_decision(company_name, trade_date, final_state)
+        self.record_decision(company_name, trade_date, final_state, portfolio=portfolio)
 
         # Clear checkpoint on successful completion to avoid stale state.
         self.clear_checkpoint_on_success(company_name, trade_date, asset_type, portfolio)
