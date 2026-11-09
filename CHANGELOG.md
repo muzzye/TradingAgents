@@ -21,6 +21,15 @@ Istruzioni per l'agente AI:
 
 ### Added
 
+- **Documentation for the deterministic math layer.** The README now explains
+  the pipeline (providers -> validation -> engine -> agents -> risk -> gate),
+  lists the fifteen modules of `tradingagents/dataflows/math/` with the formula
+  each owns, names the twenty-two tools the analysts call, and shows a real
+  audit excerpt where a wrong price-to-book and a wrong stop distance leave
+  `authorized_orders` empty with both hazards named. The reproducibility
+  section now separates what the software computes (identical across runs) from
+  what the models judge (free to differ).
+
 - **Deterministic arithmetic validator (P0-B).** New module
   (`tradingagents/dataflows/arithmetic.py`): percentage moves and distances
   from reference levels are computed as

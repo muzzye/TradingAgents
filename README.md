@@ -275,6 +275,8 @@ An interface will appear showing results as they load, letting you track the age
 | Path | What lives there |
 | --- | --- |
 | `tradingagents/` | The framework: the LangGraph pipeline (`graph/`), the agents (`agents/`), data vendors (`dataflows/`), LLM clients (`llm_clients/`) and the report writer (`reporting.py`, `report_html.py`). |
+| `tradingagents/dataflows/math/` | The Financial Math Engine: every derived financial figure, with its formula, operands and a verified/refused status. |
+| `tradingagents/agents/math_tools.py` | The twenty-two mathematical tools the analysts call, each returning structured JSON. |
 | `cli/` | The terminal app: menus, live display, run loop and preference storage. |
 | `webapp/` | The local web console: the HTTP layer (`app.py`), the run thread (`service.py`), the backtest thread (`backtest_service.py`), the decision-log reader (`memory_view.py`), the chart data (`chart.py`), the report archive (`archive.py`), safe markdown rendering (`rendering.py`) and the page (`static/`). |
 | `tests/` | The pytest suite. |
@@ -345,6 +347,91 @@ SEC_EDGAR_USER_AGENT="Your Name your@email.com"
 ```
 
 It covers companies that file with the SEC, including foreign companies listed in the US. Anything else, such as Hong Kong or A-share listings, falls through to the next vendor in the chain. EDGAR's machine-readable filings begin in 2009, and a fourth quarter is reported as unavailable rather than derived, because filers publish it only inside the annual figure.
+
+### Deterministic numbers, not LLM arithmetic
+
+A language model is not a calculator. It reads tables approximately, restates
+figures with drift, and cannot be audited. So TradingAgents computes every
+number a decision depends on in code, and lets the agents interpret the result.
+
+```
+providers supply data
+  -> the data pipeline normalises and validates it   (meaning, source, period, unit)
+  -> the Financial Math Engine computes              (tradingagents/dataflows/math/)
+  -> agents interpret certified values
+  -> the risk engine sizes the position
+  -> the Execution Gate authorises or blocks
+```
+
+The engine lives in `tradingagents/dataflows/math/` — fifteen modules, each with
+one owner per formula:
+
+| Module | What it owns |
+| --- | --- |
+| `precision.py` | `Decimal` money arithmetic, explicit rounding, unit conversion (dollars / thousands / millions / billions), CAGR |
+| `metric_record.py` | The record every metric carries: value, formula, operands, period, and a verified/refused status |
+| `registry.py` | The run's ledger of verified **and refused** metrics |
+| `technical.py` | SMA, EMA, VWMA, Wilder ATR and RSI, MACD, Bollinger with two named widths, price distances |
+| `valuation.py` | Market cap, EPS (GAAP vs adjusted), P/E (trailing vs forward), P/B, D/E, ROE, ROA, dual-class book value |
+| `definitions.py` | Refuses combining figures whose definitions differ — consolidated vs segment, GAAP vs adjusted, quarter vs TTM |
+| `sec_reconciliation.py` | Checks a stated figure against the filing's own XBRL concept |
+| `session.py`, `exchange_calendar.py` | Whether a bar is a settled close: sessions, holidays, early closes |
+| `claims.py`, `report_validation.py` | Compares what an agent asserted against the engine's value |
+| `consistency.py` | Cross-agent reconciliation |
+| `trade_actions.py` | OPEN_LONG / REDUCE_LONG / CLOSE_LONG / OPEN_SHORT / ... and their preconditions |
+| `math_gate.py` | Translates findings into the Execution Gate's reason codes |
+
+**Refusals are kept, not corrected silently.** A price-to-book of 1.35x where
+price 570.89 and book value 385.70 give 1.4801 is recorded as `MISMATCH` with
+both numbers, so a report can state that the claim was wrong. The audit JSON
+under `<results_dir>/<ticker>/reliability_audit/` carries every metric with its
+formula and operands, plus a `technical_audit` section stating which validations
+actually ran. A run whose reports carry the 2026-11-09 figures produces:
+
+```json
+{
+  "math_findings_count": 1,
+  "math_blocking_codes": ["INVALID_STOP_ATR_DISTANCE", "INVALID_PRICE_TO_BOOK"],
+  "execution_action": "BLOCK",
+  "authorized_orders": [],
+  "blocking_reasons": [
+    "DATA_QUALITY_BLOCKED",
+    "INVALID_STOP_ATR_DISTANCE",
+    "INVALID_PRICE_TO_BOOK"
+  ]
+}
+```
+
+Nothing reached the paper ledger, and the reason names the two numbers that
+failed rather than saying "an order was blocked".
+
+**Agents ask, they do not calculate.** Twenty-two typed tools are bound to the
+market and fundamentals analysts, each returning structured JSON rather than a
+bare number:
+
+```python
+calculate_percentage_change, calculate_cagr, calculate_price_to_book,
+calculate_book_value_per_share, calculate_valuation_ratio, calculate_eps,
+calculate_indicator, calculate_price_distance, calculate_distance_from_level,
+calculate_eps_change, calculate_stop_distance, calculate_stop_for_atr,
+calculate_risk_reward, calculate_quantity_sensitivity, convert_money_unit,
+validate_stated_multiple, validate_stated_percentage,
+validate_metric_definitions, validate_market_bar, validate_market_series,
+validate_trade_proposal, get_certified_metric
+```
+
+A percentage is only checkable when its denominator is named, so
+`calculate_distance_from_level` takes one: a price against a level and a level
+against a price give +4.87% and -4.64% for the same two numbers, because a
+percentage change is not symmetric.
+
+The Execution Gate blocks a paper order when the arithmetic does not hold, and
+the blocking reason names the specific hazard — `INVALID_PRICE_TO_BOOK`,
+`INVALID_STOP_ATR_DISTANCE`, `NUMERIC_CLAIM_MISMATCH`,
+`FINANCIAL_METRIC_DEFINITION_MISMATCH`. These cannot be downgraded to a WAIT: a
+wrong number does not become right later. See
+[`docs/financial-math-engine.md`](docs/financial-math-engine.md) for the full
+design and its stated limitations.
 
 ### Current holdings
 
@@ -442,6 +529,15 @@ config["temperature"] = 0.0
 ```
 
 What does not vary anymore: the analyzed company identity is resolved deterministically from the ticker before any agent runs, and the market analyst grounds exact price and indicator claims in a verified data snapshot. Earlier reports of "different companies" or fabricated price levels across runs are addressed by these two mechanisms.
+
+**Every computed number is now deterministic too.** The distinction that matters is between what the software calculates and what the models judge:
+
+- Identical inputs produce identical indicators, sizes, gate decisions, refusals and authorized quantities. Repeating a run over a frozen snapshot yields the same arithmetic, every time.
+- The strategic rating may differ between runs, and that is intended: two analysts reading the same evidence can reasonably disagree. The rating is a judgement, not a calculation.
+- A disagreement in arithmetic is no longer possible in the same way. If a model states a figure the engine can recompute, the numbers are compared and a contradiction blocks the order rather than being smoothed over.
+- A sub-1% price move cannot change a position size, because the market price is not a sizing input: the entry, the stop and the risk budget are.
+
+So a report can legitimately move from OVERWEIGHT to UNDERWEIGHT on the same data — but it cannot do so while citing numbers that contradict each other, and the audit shows which figures were certified and which were refused.
 
 Backtest results are not guaranteed to match any published figure. Returns depend on the model, the temperature, the date range, data quality, and the sampling above. Treat the framework as a research scaffold for studying multi-agent analysis, not as a strategy with a fixed, replicable return.
 
