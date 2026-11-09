@@ -21,6 +21,15 @@ Istruzioni per l'agente AI:
 
 ### Added
 
+- **Documentation for the deterministic math layer.** The README now explains
+  the pipeline (providers -> validation -> engine -> agents -> risk -> gate),
+  lists the fifteen modules of `tradingagents/dataflows/math/` with the formula
+  each owns, names the twenty-two tools the analysts call, and shows a real
+  audit excerpt where a wrong price-to-book and a wrong stop distance leave
+  `authorized_orders` empty with both hazards named. The reproducibility
+  section now separates what the software computes (identical across runs) from
+  what the models judge (free to differ).
+
 - **Deterministic arithmetic validator (P0-B).** New module
   (`tradingagents/dataflows/arithmetic.py`): percentage moves and distances
   from reference levels are computed as
@@ -356,6 +365,25 @@ Istruzioni per l'agente AI:
   live state and report writer without changing them, binds to loopback only,
   and reuses the same `results_dir` artifacts a CLI run produces.
 
+### Fixed
+
+- Multi-leg plans are actually priced by the aggregate risk engine, which
+  existed and was tested but was never called from a real run. A plan that
+  stages its entry in two legs is now read from its own labelled lines
+  (`Tranche 1: entry … stop …`), each leg priced on its own stop, and the
+  aggregate risk and per-symbol exposure budgets enforced across all legs plus
+  the position already held. A single-leg plan is the degenerate case of the
+  same path, so nothing is special-cased; prose that states a weight but no
+  price per leg yields no invented leg. The result lands in the audit under
+  `risk.aggregate_*`.
+- Deterministic sizing now runs from the caller's book: `PortfolioContext`
+  gains an optional `equity`, and `record_decision` derives the risk budget
+  from it (`risk_per_trade_pct`, 1% by default) and applies
+  `max_symbol_exposure` (5% by default) through the CLI, the web console and
+  `propagate` alike. `equity` is kept separate from `cash` — the base an
+  exposure cap is a fraction of is not the free balance. Without `equity` the
+  engine refuses to size instead of guessing, so an unknown book stays unknown
+  rather than becoming flat.
 ### Added
 
 - **Mathematical tools for the analysts.** Eighteen typed tools

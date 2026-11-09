@@ -51,6 +51,28 @@ def _validate_trade_date(trade_date) -> str:
     return value
 
 
+def _attach_existing_position(final_state: dict, portfolio, ticker: str) -> None:
+    """Publish what the book already holds in ``ticker``, for the aggregate budget.
+
+    The aggregate risk engine must count the open position: sizing two new
+    legs as if the book were flat would breach the per-symbol cap the moment
+    the second leg fills. The values go into the state (private keys, so no
+    agent prompt picks them up) and ``evaluate_decision`` reads them there —
+    a single source for "what is already committed".
+
+    Nothing is written when the book is unknown: an absent portfolio is not a
+    flat one, and a zero quantity would silently pass as "already priced".
+    """
+    if portfolio is None:
+        return
+    held = portfolio.position_in(ticker)
+    if held is None or not held.quantity:
+        return
+    final_state["position_quantity"] = held.quantity
+    if held.average_price is not None:
+        final_state["position_average_price"] = held.average_price
+
+
 # Config keys that do not change what a run writes: where it keeps its files,
 # whether it checkpoints, and how often it retries a provider.
 _NOT_IN_SIGNATURE = frozenset({
@@ -374,11 +396,18 @@ class TradingAgentsGraph:
         with run_config(self.config):
             return settlement.settle_all_pending(self.memory_log, self.reflector, self.config, wait=wait)
 
-    def record_decision(self, company_name, trade_date, final_state):
+    def record_decision(self, company_name, trade_date, final_state, portfolio=None):
         """Record a finished run: its state log, and its decision in the memory log
-        for reflection on the next same-ticker run. propagate() and the CLI both end here."""
+        for reflection on the next same-ticker run. propagate() and the CLI both end here.
+
+        ``portfolio`` is the caller's book, when one was supplied. It is what
+        makes deterministic sizing possible at all: the risk budget and the
+        per-symbol exposure cap are fractions of the account's equity, so
+        without a book the gate refuses to size rather than inventing one.
+        """
         self._log_state(trade_date, final_state)
-        self._evaluate_reliability(company_name, trade_date, final_state)
+        self._evaluate_reliability(company_name, trade_date, final_state,
+                                   portfolio=portfolio)
         decision = final_state.get("final_trade_decision")
         if not decision:
             logger.warning("No final decision for %s on %s; nothing added to the memory log",
@@ -389,7 +418,8 @@ class TradingAgentsGraph:
             rating=run_rating(final_state),
         )
 
-    def _evaluate_reliability(self, company_name, trade_date, final_state):
+    def _evaluate_reliability(self, company_name, trade_date, final_state,
+                              portfolio=None):
         """Run the decision through the Execution Gate and write the audit.
 
         Best-effort by design: a reliability-layer failure must not lose the
@@ -404,11 +434,24 @@ class TradingAgentsGraph:
         no filings, and the gate reports FUNDAMENTALS_UNAVAILABLE rather
         than guessing — an extraction failure must not skip the gate, it
         must fail closed.
+
+        The P0.5/P0-C sizing runs from the caller's book: ``equity`` comes
+        from the portfolio, and the risk budget and per-symbol exposure cap
+        are configured fractions of it. Without a book the numbers stay None
+        and the engine records PORTFOLIO_CONTEXT_MISSING — an unknown book is
+        never treated as a flat one.
         """
         filings = self._known_filings(company_name, trade_date)
         used_end = used_period_end_from_report(
             final_state.get("fundamentals_report")
         )
+        equity = self._portfolio_equity(portfolio)
+        _attach_existing_position(final_state, portfolio, company_name)
+        risk_budget = None
+        if equity is not None:
+            fraction = self.config.get("risk_per_trade_pct")
+            if isinstance(fraction, (int, float)) and 0 < fraction <= 1:
+                risk_budget = equity * float(fraction)
         try:
             record, decision = evaluate_decision(
                 company_name, trade_date, final_state,
@@ -419,6 +462,10 @@ class TradingAgentsGraph:
                 },
                 fundamentals_filings=filings,
                 used_fundamentals_period_end=used_end,
+                equity=equity,
+                cash=getattr(portfolio, "cash", None),
+                risk_budget=risk_budget,
+                max_symbol_exposure=self.config.get("max_symbol_exposure"),
             )
             attach_to_state(final_state, decision)
             path = write_audit_record(record, self.config["results_dir"])
@@ -427,6 +474,20 @@ class TradingAgentsGraph:
         except Exception:  # noqa: BLE001 — the audit must never sink the run
             logger.exception("Reliability evaluation failed for %s on %s",
                              company_name, trade_date)
+
+    def _portfolio_equity(self, portfolio) -> float | None:
+        """The account's equity, when the caller supplied and stated it.
+
+        Equity is deliberately not derived from cash: "how much is free to
+        deploy" and "how large the account is" are different facts, and
+        treating cash as equity would cap a position against the wrong base.
+        A missing or non-positive equity is None, so the engine refuses to
+        size instead of guessing a book.
+        """
+        value = getattr(portfolio, "equity", None)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value) if float(value) > 0 else None
 
     def _known_filings(self, ticker: str, trade_date: str) -> list | None:
         """The authoritative filings known at the analysis date, point-in-time.
@@ -475,7 +536,7 @@ class TradingAgentsGraph:
         else:
             final_state = self.graph.invoke(graph_input, **args)
 
-        self.record_decision(company_name, trade_date, final_state)
+        self.record_decision(company_name, trade_date, final_state, portfolio=portfolio)
 
         # Clear checkpoint on successful completion to avoid stale state.
         self.clear_checkpoint_on_success(company_name, trade_date, asset_type, portfolio)

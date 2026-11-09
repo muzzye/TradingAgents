@@ -186,6 +186,14 @@ def build_default_config() -> dict:
         # blocks the decision's execution vocabulary. Disable only when the
         # instrument universe has no US filers at all.
         "fundamentals_freshness_gate": True,
+        # P0.5/P0-C risk policy, as fractions of the account's equity. Both
+        # are policy inputs, never derived from a ticker: ``risk_per_trade_pct``
+        # is the per-decision risk budget (1% of equity) and
+        # ``max_symbol_exposure`` caps one symbol's notional (5% of equity).
+        # They only apply when the caller supplies a portfolio with a known
+        # ``equity``; without it no size is invented and the gate fails closed.
+        "risk_per_trade_pct": 0.01,
+        "max_symbol_exposure": 0.05,
         "benchmark_ticker": None,
         "benchmark_map": {
             ".NS":  "^NSEI",       # NSE India (Nifty 50)

@@ -18,6 +18,7 @@ adds the verdict that would govern one.
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 from tradingagents.dataflows.arithmetic import (
@@ -39,7 +40,10 @@ from tradingagents.dataflows.filing_freshness import (
 )
 from tradingagents.dataflows.math.math_gate import evaluate_math
 from tradingagents.dataflows.math.report_validation import validate_analyst_report
-from tradingagents.dataflows.plan_extraction import extract_plan_numbers
+from tradingagents.dataflows.plan_extraction import (
+    extract_plan_numbers,
+    extract_tranche_plans,
+)
 from tradingagents.dataflows.portfolio_decision import (
     map_legacy_rating,
     with_execution_action,
@@ -48,6 +52,7 @@ from tradingagents.dataflows.risk_engine import (
     DEFAULT_MIN_ENTRY_STOP_ATR,
     RiskReason,
     StopValidation,
+    aggregate_tranche_risk,
     size_with_exposure_cap,
     validate_stop_side,
 )
@@ -57,6 +62,70 @@ logger = logging.getLogger(__name__)
 # The state keys the audit reads; all optional, all defaulted.
 _POLICY_VERSION = "reliability-contract-2026-11"
 
+
+def _existing_notional(final_state: dict, ticker: str, price: float | None) -> float:
+    """The notional already held in ``ticker``, valued at the plan's entry.
+
+    The aggregate budget must count what is already open: sizing two new legs
+    as if the book were empty would breach the per-symbol cap the moment the
+    second leg fills. Unknown is 0.0 here only because the *positions* are
+    unknown to this function — the caller that does know (``record_decision``
+    reads the portfolio) supplies them; with no book at all, the engine
+    refuses on its own (no equity), so nothing is invented.
+    """
+    held = final_state.get("position_quantity")
+    try:
+        quantity = float(held)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(quantity) or not quantity or price is None:
+        return 0.0
+    return abs(quantity) * price
+
+
+def _existing_risk(final_state: dict, ticker: str, price: float | None) -> float:
+    """Risk already committed to ``ticker``, from its entry to the plan stop.
+
+    Without a known average price and stop the open risk is unknown, and
+    counting it as zero would understate the budget. This returns 0.0 only
+    when the caller supplied no position: the engine already refuses to size
+    without portfolio context, so an unknown book is never treated as a flat
+    one at this layer.
+    """
+    try:
+        quantity = float(final_state.get("position_quantity"))
+        average = float(final_state.get("position_average_price"))
+    except (TypeError, ValueError):
+        return 0.0
+    stop = final_state.get("position_stop")
+    try:
+        stop_value = float(stop) if stop is not None else None
+    except (TypeError, ValueError):
+        stop_value = None
+    if not (math.isfinite(quantity) and math.isfinite(average)) or not quantity:
+        return 0.0
+    if stop_value is None or not math.isfinite(stop_value):
+        return 0.0
+    return abs(quantity) * abs(average - stop_value)
+
+
+def _aggregate_reason_to_risk(reason: str) -> RiskReason:
+    """Map the aggregate engine's string reasons onto the risk enum.
+
+    The engine reports string codes because a leg's geometry failure is not
+    a ``RiskReason``. The gate speaks ``RiskReason``, so the plan can carry
+    one vocabulary; an unmapped code still blocks, as ``RISK_BUDGET_MISSING``
+    is the closest honest label for "the aggregate could not be met".
+    """
+    mapping = {
+        RiskReason.RISK_BUDGET_MISSING.value: RiskReason.RISK_BUDGET_MISSING,
+        RiskReason.PORTFOLIO_CONTEXT_MISSING.value: RiskReason.PORTFOLIO_CONTEXT_MISSING,
+        RiskReason.EXPOSURE_CAP_INVALID.value: RiskReason.EXPOSURE_CAP_INVALID,
+        RiskReason.INVALID_ENTRY.value: RiskReason.INVALID_ENTRY,
+        RiskReason.DIRECTION_INVALID.value: RiskReason.DIRECTION_INVALID,
+        RiskReason.INVALID_STOP.value: RiskReason.INVALID_STOP,
+    }
+    return mapping.get(reason, RiskReason.RISK_BUDGET_MISSING)
 
 def _assess_price_bar(price_snapshot: dict, trade_date: str) -> dict | None:
     """Assess the price bar the run used, for the technical audit (§9).
@@ -266,6 +335,37 @@ def evaluate_decision(
                     risk_blocked = True
                     risk_reasons = risk_reasons + sizing.reasons
 
+    # P0-C: price EVERY leg on its own entry and stop and enforce the
+    # aggregate budget across all of them. Single-tranche sizing above
+    # prices only the plan's primary leg; a plan that stages its entry in
+    # two legs is not one position sized twice. The single-leg case is the
+    # degenerate case of this same path, so the aggregate result is always
+    # available whenever a plan was stated — and it is what the audit records.
+    aggregate = None
+    legs = extract_tranche_plans(
+        final_state.get("trader_investment_plan"),
+        default_atr=eff_atr,
+    )
+    if legs:
+        aggregate = aggregate_tranche_risk(
+            [
+                {"entry": leg.entry, "stop": leg.stop,
+                 "atr": leg.atr if leg.has_atr else eff_atr,
+                 "direction": leg.direction}
+                for leg in legs
+            ],
+            risk_budget=risk_budget,
+            equity=equity,
+            max_symbol_exposure=max_symbol_exposure,
+            existing_notional=_existing_notional(final_state, ticker, eff_entry),
+            existing_risk=_existing_risk(final_state, ticker, eff_entry),
+        )
+        if aggregate.blocked:
+            risk_blocked = True
+            risk_reasons = risk_reasons + tuple(
+                _aggregate_reason_to_risk(r) for r in aggregate.reasons
+            )
+
     # P0: the stop must sit on the protective side for the position's
     # direction. A wrong-side stop protects nothing and blocks the plan.
     stop_side = None
@@ -442,6 +542,8 @@ def evaluate_decision(
         record.fact_registry = registry
     if sizing is not None:
         record.exposure_sizing = sizing
+    if aggregate is not None:
+        record.aggregate_risk = aggregate
     if arithmetic_verdicts:
         record.arithmetic_verdicts = arithmetic_verdicts
     if math_verdict is not None:
