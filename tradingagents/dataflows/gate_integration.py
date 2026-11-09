@@ -38,6 +38,8 @@ from tradingagents.dataflows.fact_registry import register_facts
 from tradingagents.dataflows.filing_freshness import (
     check_filing_freshness,
 )
+from tradingagents.dataflows.math.math_gate import evaluate_math
+from tradingagents.dataflows.math.report_validation import validate_analyst_report
 from tradingagents.dataflows.plan_extraction import (
     extract_plan_numbers,
     extract_tranche_plans,
@@ -125,6 +127,52 @@ def _aggregate_reason_to_risk(reason: str) -> RiskReason:
     }
     return mapping.get(reason, RiskReason.RISK_BUDGET_MISSING)
 
+def _assess_price_bar(price_snapshot: dict, trade_date: str) -> dict | None:
+    """Assess the price bar the run used, for the technical audit (§9).
+
+    Returns ``None`` when the snapshot carries no timestamp: a bar without a
+    time cannot be judged, and a null in the audit says so more honestly than an
+    invented verdict.
+    """
+    stamp = price_snapshot.get("price_as_of")
+    if not stamp:
+        return None
+    try:
+        from tradingagents.dataflows.math.session import assess_bar
+
+        return assess_bar(stamp, analysis_time=trade_date).summary()
+    except Exception:  # noqa: BLE001 — an unparseable stamp yields no verdict
+        logger.debug("Could not assess the price bar %r", stamp, exc_info=True)
+        return None
+
+
+def _bar_still_forming(price_snapshot: dict | None,
+                       trade_date: str) -> bool:
+    """Whether the price bar this run used belongs to a session still trading.
+
+    Reads the snapshot's ``price_as_of`` timestamp, which is when the price was
+    observed. A timestamp inside the session means the price is moving, so a
+    post-event reaction computed from it is intraday, not settled.
+
+    No timestamp yields ``False``: the causal guard already treats an unknown
+    event time as ``INSUFFICIENT_DATA``, and inventing a session state here
+    would be a second guess on top of the first.
+    """
+    if not isinstance(price_snapshot, dict):
+        return False
+    stamp = price_snapshot.get("price_as_of")
+    if not stamp:
+        return False
+    try:
+        from tradingagents.dataflows.math.session import (
+            SessionStatus,
+            market_session_status,
+        )
+
+        return market_session_status(stamp) is SessionStatus.OPEN
+    except Exception:  # noqa: BLE001 — an unparseable stamp is not "open"
+        return False
+
 
 def _freshness_from_precheck(precheck: dict):
     """Rebuild a freshness verdict from the graph pre-check's summary.
@@ -179,6 +227,11 @@ def evaluate_decision(
     # percentage the report states can be checked against the data.
     price_snapshot: dict | None = None,
     stated_percentages: dict | None = None,
+    # Financial Math Engine (§9, §11): the run's metric registry (verified and
+    # refused metrics), and the ATR multiple the report claims for its stop so
+    # the arithmetic can be checked against entry/stop/ATR.
+    metric_registry=None,
+    stated_atr_distance: float | None = None,
 ) -> tuple[AuditRecord, GateDecision]:
     """Evaluate a finished run's decision through the gate and audit it.
 
@@ -217,11 +270,16 @@ def evaluate_decision(
         logger.warning("Unreadable rating for %s on %s; gate will block",
                        ticker, trade_date)
 
-    # Causal guard: only when the run knows an event and a calendar.
+    # Causal guard: only when the run knows an event and a calendar. The
+    # session status decides whether a post-event move is a settled reaction or
+    # one still forming (§5) — derived from the price bar when one was
+    # supplied, so an intraday analysis cannot be mistaken for an EOD one.
     causal = None
     if event_publication_date and sessions:
+        bar_open = _bar_still_forming(price_snapshot, trade_date)
         causal = evaluate_post_event_pricing(
-            event_publication_date, sessions, as_of_date=trade_date
+            event_publication_date, sessions, as_of_date=trade_date,
+            session_still_open=bar_open,
         )
 
     # Risk engine: the plan's numbers come from the caller when supplied,
@@ -387,6 +445,63 @@ def evaluate_decision(
     if arithmetic_blocked:
         data_quality_blocked = True
 
+    # Financial Math Engine (§9, §11): the plan's own numbers must hold up
+    # arithmetically, and any numeric claim the reports make must either
+    # match a verified metric or be reported unverifiable. A contradiction
+    # here is a hard block, so it cannot be downgraded to a WAIT later.
+    # §7: the constraint on agent arithmetic lives in code. Each analyst's
+    # report is checked against the certified metrics, so a figure the engine
+    # disproves blocks here rather than relying on a prompt asking the model
+    # not to compute.
+    report_validations = []
+    reports_to_check = {
+        "market": final_state.get("market_report"),
+        "fundamentals": final_state.get("fundamentals_report"),
+        "news": final_state.get("news_report"),
+    }
+    for agent_name, text in reports_to_check.items():
+        if not isinstance(text, str) or not text:
+            continue
+        validation = validate_analyst_report(
+            text, agent=agent_name, registry=metric_registry,
+        )
+        report_validations.append(validation)
+        if validation.blocks_decision:
+            data_quality_blocked = True
+
+    math_verdict = None
+    try:
+        math_verdict = evaluate_math(
+            registry=metric_registry,
+            reports={
+                key: final_state.get(key)
+                for key in ("market_report", "news_report", "sentiment_report",
+                            "fundamentals_report", "investment_plan",
+                            "trader_investment_plan")
+                if isinstance(final_state.get(key), str)
+            } or None,
+            entry=eff_entry,
+            stop=eff_stop,
+            atr=eff_atr,
+            direction=eff_direction,
+            stated_atr_distance=stated_atr_distance,
+            strategic_rating=strategic.rating if strategic else None,
+            authorized_orders=0,
+            # No period comparison here: the accounting-period check needs a
+            # *period end* on both sides, and ``trade_date`` is an analysis
+            # date, not a fiscal period. Comparing the two flagged every run
+            # whose report had no fundamentals section. The freshest-period
+            # question is already answered by the filing freshness gate
+            # above, which knows both periods.
+        )
+    except Exception:  # noqa: BLE001 — the math layer must not sink the run
+        logger.exception("Financial math evaluation failed for %s on %s",
+                         ticker, trade_date)
+
+    math_reasons = math_verdict.reasons if math_verdict is not None else ()
+    if math_reasons:
+        data_quality_blocked = True
+
     plan = PlanInput(
         ticker=ticker,
         rating=strategic.rating if strategic else "UNKNOWN",
@@ -399,6 +514,7 @@ def evaluate_decision(
         signal_as_of=trade_date,
         analysis_as_of=trade_date,
         market_open=market_open,
+        math_reasons=math_reasons,
     )
     decision = evaluate_plan(plan)
 
@@ -430,6 +546,16 @@ def evaluate_decision(
         record.aggregate_risk = aggregate
     if arithmetic_verdicts:
         record.arithmetic_verdicts = arithmetic_verdicts
+    if math_verdict is not None:
+        record.math_verdict = math_verdict
+
+    # §9: the audit must state whether the decision rested on a confirmed close
+    # or on a bar still forming. Without this the three bar fields stay null and
+    # a reader cannot tell an EOD analysis from an intraday one.
+    if price_snapshot:
+        bar_assessment = _assess_price_bar(price_snapshot, trade_date)
+        if bar_assessment is not None:
+            record.price_snapshot_bar = bar_assessment
 
     # P0-D: the structured, machine-readable execution verdict. It carries
     # the gate's action and every blocking reason; authorized_orders stays

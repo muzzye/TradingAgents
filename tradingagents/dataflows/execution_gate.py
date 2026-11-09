@@ -29,7 +29,10 @@ import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from tradingagents.dataflows.causal_guard import NOT_YET_OBSERVABLE
+from tradingagents.dataflows.causal_guard import (
+    NOT_YET_OBSERVABLE,
+    OBSERVABLE_INTRADAY,
+)
 from tradingagents.dataflows.risk_engine import RiskReason, portfolio_risk_check
 
 
@@ -59,6 +62,20 @@ class GateReason(StrEnum):
     STALE_SIGNAL = "STALE_SIGNAL"
     MARKET_CLOSED = "MARKET_CLOSED"
     DUPLICATE_ORDER = "DUPLICATE_ORDER"
+    # Financial Math Engine verdicts (§11). Each names a specific
+    # mathematical hazard, so a blocked order says *which* number was wrong
+    # rather than only that something was.
+    INVALID_PRICE_TO_BOOK = "INVALID_PRICE_TO_BOOK"
+    INVALID_STOP_ATR_DISTANCE = "INVALID_STOP_ATR_DISTANCE"
+    INVALID_VALUATION_METRIC = "INVALID_VALUATION_METRIC"
+    NUMERIC_CLAIM_CONTRADICTED = "NUMERIC_CLAIM_CONTRADICTED"
+    NUMERIC_CLAIM_UNVERIFIABLE = "NUMERIC_CLAIM_UNVERIFIABLE"
+    # §3: a percentage an agent stated that the engine recomputes differently.
+    # Distinct from CONTRADICTED, which covers a stated multiple: this one is
+    # specifically a claimed rate (growth, contraction, distance) that the
+    # registry disproves.
+    NUMERIC_CLAIM_MISMATCH = "NUMERIC_CLAIM_MISMATCH"
+    STALE_FUNDAMENTALS_PERIOD = "STALE_FUNDAMENTALS_PERIOD"
 
 
 # Strategic ratings (contract §4 level 1). Disjoint from ExecutionAction by
@@ -101,6 +118,11 @@ class PlanInput:
     signal_as_of: str | None = None          # YYYY-MM-DD or None
     analysis_as_of: str | None = None        # YYYY-MM-DD or None
     market_open: bool = True
+    # Financial Math Engine verdicts (§11). ``math_reasons`` carries the
+    # specific hazards the engine detected (INVALID_PRICE_TO_BOOK,
+    # INVALID_STOP_ATR_DISTANCE, contradicted numeric claims, ...). They are
+    # *hard* blocks: a mathematical contradiction is not a "not yet".
+    math_reasons: tuple[GateReason, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -134,13 +156,20 @@ def evaluate_plan(plan: PlanInput) -> GateDecision:
     if plan.data_quality_blocked:
         reasons.append(GateReason.DATA_QUALITY_BLOCKED)
 
+    # Financial Math Engine (§11): a contradicted multiple, a stop distance
+    # that does not match its own entry/ATR, or an unverifiable critical
+    # claim. Appended before the "not yet" logic so these can never be
+    # downgraded to a WAIT — a wrong number does not become right later.
+    reasons.extend(plan.math_reasons)
+
     # Causal guard (Phase 1): a reaction claim needs a post-event session.
     # When the trigger is already met the plan would act *now* on a reaction
     # that cannot be verified: that is the contract's hard BLOCK ("when the
     # strategy relies on the presumed reaction"). When the trigger is unmet
     # the plan is not acting on the reaction yet, so it is a WAIT reason —
     # the contract's own example schema carries this code inside a WAIT.
-    reaction_unobservable = plan.post_event_status == NOT_YET_OBSERVABLE
+    reaction_unobservable = plan.post_event_status in (
+        NOT_YET_OBSERVABLE, OBSERVABLE_INTRADAY)
     if reaction_unobservable and plan.trigger_met:
         reasons.append(GateReason.POST_EARNINGS_REACTION_UNOBSERVABLE)
 
