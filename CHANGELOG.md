@@ -19,6 +19,29 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.11] — 2026-11-10
+
+### Fixed
+
+- **The revenue-claim check reads Italian reports, and shows both figures.**
+  Two gaps in 0.8.10. `sec_claim_reconciliation` recognised only English labels
+  and the English number convention, so an Italian report — the project's output
+  language is configurable — was never checked against the filing. The
+  recogniser now covers `ricavi`, `ricavi consolidati`, `ricavi totali` and
+  `fatturato`, the scale words `milioni`/`milione`/`mln`/`M$` and
+  `miliardi`/`miliardo`/`mld`, and Markdown table rows (`| Ricavi | 74.322 | mln |`).
+  The number parser reads both conventions — `105,647` and `105.647` are the
+  same quantity when the scale says millions — and uses the scale word to
+  disambiguate a three-digit group: `74,322 miliardi` is 74.322 billion, not
+  74,322 billion. A segment, a contract figure and a prior-period citation are
+  still not treated as claims on the consolidated total.
+- **The finding is persisted as data, not only as a reason code.**
+  `AuditRecord.revenue_claim_findings` and `RunRecord.revenue_claim_findings`
+  now carry the complete finding — code, metric, both values, period, unit,
+  agent, accession, description, severity and the blocking flag — so a reader
+  can see what was claimed and what the filing states. The certified
+  `MetricRecord` is unchanged: the finding sits beside it.
+
 ## [0.8.10] — 2026-11-10
 
 ### Fixed

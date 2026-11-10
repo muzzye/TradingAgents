@@ -192,6 +192,10 @@ class RunRecord:
     # concluded but not what it read to conclude it, and a figure sourced from
     # a tool call cannot be traced to that call.
     tool_calls: list = field(default_factory=list)
+    # FIX #1.1: reports whose stated revenue contradicts the filing, as full
+    # findings. Duplicated from the audit on purpose: a reader looking at the
+    # run record should not have to walk the whole audit to find them.
+    revenue_claim_findings: list = field(default_factory=list)
     # The decision, the risk assessment and the gate's verdict.
     decision: dict = field(default_factory=dict)
     risk: dict = field(default_factory=dict)
@@ -214,6 +218,7 @@ class RunRecord:
             "metric_registry": self.metric_registry,
             "agents": self.agents,
             "tool_calls": self.tool_calls,
+            "revenue_claim_findings": self.revenue_claim_findings,
             "decision": self.decision,
             "risk": self.risk,
             "execution_gate": self.execution_gate,

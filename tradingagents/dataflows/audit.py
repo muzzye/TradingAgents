@@ -79,6 +79,10 @@ class AuditRecord:
     # technical audit can state whether the decision rested on a confirmed
     # close or on a bar still forming.
     price_snapshot_bar: object | None = None
+    # FIX #1.1: reports whose stated consolidated revenue contradicts the
+    # filing. Kept as full findings, not only as a reason code, so a reader can
+    # see both figures and the accession they came from.
+    revenue_claim_findings: list | None = None
 
     # Market snapshot as validated (None fields stay None: never invented).
     session_date: str | None = None
@@ -122,6 +126,13 @@ class AuditRecord:
             "execution": self._execution_entry(),
             "risk": self._risk_entry(),
             "data_quality": self._data_quality_entry(),
+            # FIX #1.1: the complete findings, beside the certified metric —
+            # never replacing it.
+            "revenue_claim_findings": (
+                [f.summary() if hasattr(f, "summary") else f
+                 for f in self.revenue_claim_findings]
+                if self.revenue_claim_findings else None
+            ),
             "financial_math": (
                 self.math_verdict.summary() if self.math_verdict is not None else None
             ),

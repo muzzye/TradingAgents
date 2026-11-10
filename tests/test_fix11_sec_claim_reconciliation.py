@@ -294,3 +294,116 @@ class TestT6bRunRecord:
         )
         path = rr.write_run(tmp_path, run)
         assert "SEC_REVENUE_CLAIM_MISMATCH" not in path.read_text(encoding="utf-8")
+
+
+# ===========================================================================
+# FIX #1.1 final review — Italian reports and structured persistence
+# ===========================================================================
+class TestItalianReports:
+    """The reports are written in the configured output language.
+
+    An Italian sentence saying "i ricavi consolidati sono 74.322 milioni" is a
+    claim on the same quantity as its English counterpart, and the Italian
+    convention puts the dot on thousands and the comma on decimals — so
+    `74.322` is 74322 and `74,322` is 74.322.
+    """
+
+    @pytest.mark.parametrize("text,expected", [
+        ("I ricavi consolidati del Q3 sono stati 74.322 milioni di dollari.",
+         74_322_000_000.0),
+        ("Il fatturato del trimestre è di 74,322 miliardi USD.",
+         74_322_000_000.0),
+        ("Ricavi: 74.322 mln USD.", 74_322_000_000.0),
+        ("| Ricavi | 74.322 | mln |", 74_322_000_000.0),
+        ("I ricavi totali si attestano a 74.322 milioni di dollari.",
+         74_322_000_000.0),
+    ])
+    def test_an_italian_claim_is_read_in_base_units(self, text, expected):
+        findings = _reconcile(text)
+        assert len(findings) == 1, f"not recognised: {text!r}"
+        assert findings[0].claimed_value == expected
+
+    @pytest.mark.parametrize("text", [
+        "I ricavi consolidati Q3 2026 sono 105.647 milioni.",
+        "I ricavi consolidati sono 105,647 miliardi di dollari.",
+    ])
+    def test_the_consolidated_figure_stated_correctly_is_not_a_mismatch(self, text):
+        assert _reconcile(text) == []
+
+    @pytest.mark.parametrize("text", [
+        "I ricavi da contratti con clienti sono 74,322 miliardi, un componente.",
+        "Il segmento assicurativo ha riportato ricavi per 74.322 milioni.",
+        "Per riferimento, nel Q3 2024 i ricavi consolidati erano 74,322 miliardi.",
+    ])
+    def test_a_component_segment_or_prior_period_is_not_a_claim(self, text):
+        assert _reconcile(text) == [], f"false positive on {text!r}"
+
+    def test_the_italian_scale_words_are_equivalent(self):
+        """`mln`, `milioni` and `M$` are millions; `mld`, `miliardi` are billions."""
+        from tradingagents.dataflows.sec_claim_reconciliation import _scale_value
+
+        assert _scale_value("74.322", "milioni") == 74_322_000_000.0
+        assert _scale_value("74.322", "mln") == 74_322_000_000.0
+        assert _scale_value("74,322", "miliardi") == 74_322_000_000.0
+        assert _scale_value("74,322", "mld") == 74_322_000_000.0
+        assert _scale_value("105.647", "milioni") == 105_647_000_000.0
+        assert _scale_value("105,647", "miliardi") == 105_647_000_000.0
+
+
+class TestStructuredPersistence:
+    """The finding must survive as data, not only as a reason code."""
+
+    def _run(self):
+        from tradingagents.dataflows.gate_integration import evaluate_decision
+
+        state = _rated_state(
+            "I ricavi consolidati del Q3 sono stati 74.322 milioni di dollari.")
+        registry = _certified_registry()
+        return evaluate_decision(
+            "BRK-B", F.ANALYSIS_DATE, state, snapshot_id="persist",
+            metric_registry=registry, trigger_met=True), registry
+
+    def test_the_audit_carries_the_complete_finding(self):
+        (record, decision), _ = self._run()
+        findings = record.to_dict().get("revenue_claim_findings")
+        assert findings, "the audit must carry the finding itself"
+        finding = findings[0]
+        for field in ("code", "metric_id", "sec_value", "claimed_value",
+                      "period_end", "unit", "agent", "accession",
+                      "description", "severity", "blocks"):
+            assert field in finding, field
+        assert finding["sec_value"] == EXPECTED
+        assert finding["claimed_value"] == COMPONENT
+        assert finding["blocks"] is True
+
+    def test_the_reason_code_alone_is_not_the_record(self):
+        """The gate reason is a code; the audit entry is the evidence."""
+        (record, decision), _ = self._run()
+        assert "SEC_REVENUE_CLAIM_MISMATCH" in [r.value for r in decision.reasons]
+        audit_json = json.dumps(record.to_dict())
+        assert '"claimed_value"' in audit_json, (
+            "only the code was recorded, not the two figures")
+
+    def test_the_run_record_carries_the_finding(self, tmp_path):
+        from tradingagents.dataflows import run_record as rr
+
+        (record, _), registry = self._run()
+        run = rr.RunRecord(
+            run_id=rr.new_run_id("BRK-B"), ticker="BRK-B",
+            analysis_date=F.ANALYSIS_DATE,
+            metric_registry=registry.summary(),
+            revenue_claim_findings=(
+                record.to_dict().get("revenue_claim_findings") or []),
+            execution_gate=record.to_dict().get("execution", {}),
+            audit=record.to_dict(),
+        )
+        path = rr.write_run(tmp_path, run)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["revenue_claim_findings"], "run record lost the finding"
+        assert payload["revenue_claim_findings"][0]["claimed_value"] == COMPONENT
+
+    def test_the_certified_metric_is_untouched_by_the_conflict(self):
+        (_, _), registry = self._run()
+        metric = registry.get("consolidated_revenue")
+        assert metric.value == EXPECTED
+        assert metric.is_usable is True

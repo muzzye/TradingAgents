@@ -475,6 +475,9 @@ def evaluate_decision(
         gate=decision,
         strategic=strategic,
         session_date=sessions[-1] if sessions else None,
+        # FIX #1.1: the complete findings, so the audit and the run record
+        # carry both figures rather than only the reason code.
+        revenue_claim_findings=list(revenue_findings) or None,
     )
     if freshness is not None:
         record.fundamentals_freshness = freshness

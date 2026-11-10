@@ -626,6 +626,8 @@ class TradingAgentsGraph:
                 },
                 risk=audit_record.to_dict().get("risk", {}),
                 execution_gate=audit_record.to_dict().get("execution", {}),
+                revenue_claim_findings=(
+                    audit_record.to_dict().get("revenue_claim_findings") or []),
                 audit=audit_record.to_dict(),
             )
             path = rr.write_run(
