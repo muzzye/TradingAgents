@@ -187,9 +187,7 @@ Also observed, and part of the same gap: the `calculate_*` tools compute a
 value and return it, but never write it into `_REGISTRY`. A metric the agent
 had certified is lost, and the gate must recompute it from state or report text.
 
-Not fixed in this branch: the correct fix changes **when** the registry is
-created — at the start of the run, populated by the tools, and propagated to
-the analysts — which is a change to the live graph path, not a verification.
+**Fixed in phase 7** (branch `fix/p7-agent-registry`, see §R2 resolution below).
 
 ### R3 — the startup line does not name the build *(low)*
 
@@ -270,3 +268,77 @@ $ pytest tests/test_p1_runtime_gate_integration.py tests/test_p1_build_info.py \
 - No restart of the running service.
 - No fix for R1 or R2 — both are recorded with reproductions, deliberately
   deferred.
+
+
+## R2 resolution (phase 7)
+
+R2 is closed in branch `fix/p7-agent-registry`. The fix needed three parts, and
+leaving any one out would have looked fixed while remaining broken.
+
+### 1. The binding is a `ContextVar`, not a module global
+
+`math_tools._REGISTRY` was a process-wide global. That is wrong twice: the web
+console runs several analyses at once, so one analysis's registry would answer
+another's tool calls — the leak reproduced in this document's R2 section, where
+the full suite returned `1.4801` from a different test — and a global survives
+the run that set it, so the next analysis read stale metrics.
+
+It is now `_run_registry_var: ContextVar`, the same mechanism
+`dataflows/config` already uses for a run's vendors. LangGraph carries the
+context into tool calls.
+
+### 2. The graph binds it for the whole run
+
+`_run_graph` creates the registry *before* the agents start and holds the
+binding until the run ends:
+
+```python
+run_registry = MetricRegistry(run_id=f"{company_name}-{trade_date}")
+token = set_run_registry(run_registry)
+try:
+    ...  # the agents work; their tool calls now read this registry
+    self.record_decision(..., run_registry=run_registry)
+finally:
+    reset_run_registry(token)
+```
+
+`_evaluate_reliability` certifies that same registry (`_complete_run_registry`
+adds the figures that only exist once the agents have finished) instead of
+building a second one. Building a second registry would mean the gate certifies
+a different set of records from the figures the analysts were given.
+
+The binding is inline in `_run_graph` rather than in a helper, because callers
+drive that method directly (`partial(TradingAgentsGraph._run_graph, graph)` in
+`test_memory_log.py`); a `self.<helper>` call would resolve against the caller.
+
+### 3. The tools record what they compute
+
+`_payload()` — the single exit point of every `calculate_*` tool — registers the
+`MetricRecord` in the bound registry before answering. Previously a value the
+agent had legitimately computed was returned to the model and then lost, and the
+gate had to recompute it from state or prose.
+
+### Evidence
+
+```
+registry has usable P/B: True        # the gate's own registry
+agent sees (inside the binding): 1.6041 | VERIFIED
+outside the binding:                     None
+```
+
+And through the real graph path:
+
+```
+memory entries: 1
+registry after run (must be None): None
+```
+
+### Regression tests
+
+`tests/test_p1_runtime_verification.py::TestR2AgentRegistry` now pins the fixed
+behaviour instead of the defect: an agent reads a certified metric inside a run,
+answers `UNSUPPORTED` outside one, two runs do not share a registry, a tool
+records what it computed, and the binding is restored after an exception.
+`tests/test_deterministic_math.py` had three tests that bound a registry without
+releasing it — the leak R2 describes, in test form — and now uses the
+`certified_registry` context manager.

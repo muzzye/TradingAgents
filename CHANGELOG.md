@@ -19,6 +19,30 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.7] — 2026-11-10
+
+### Fixed
+
+- **The agents can read the certified metrics their run is judged on.** The
+  data-lineage audit found `set_run_registry` had no production call site, so
+  every `get_certified_metric` answered `UNSUPPORTED` while the analyst was
+  working — the tool existed, was bound to the market and fundamentals
+  analysts, and could not work. Three parts were needed:
+  - the binding is a `ContextVar` instead of a module global, so two analyses in
+    one process (the web console runs several) no longer read each other's
+    registry, and a finished run no longer leaves its metrics readable to the
+    next one;
+  - `_run_graph` creates the registry before the agents start and holds the
+    binding for the whole run, so the gate certifies the same records the
+    analysts were given rather than a second set rebuilt from the finished
+    state;
+  - `_payload()`, the single exit point of every `calculate_*` tool, records the
+    `MetricRecord` in the bound registry, so a value an agent legitimately
+    computed is no longer returned to the model and then lost.
+- **`tests/test_deterministic_math.py` no longer leaks a registry between
+  tests.** Three tests bound one without releasing it — the defect this release
+  fixes, in test form — and now use the `certified_registry` context manager.
+
 ## [0.8.6] — 2026-11-10
 
 ### Added

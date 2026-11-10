@@ -448,7 +448,8 @@ class TradingAgentsGraph:
         with run_config(self.config):
             return settlement.settle_all_pending(self.memory_log, self.reflector, self.config, wait=wait)
 
-    def record_decision(self, company_name, trade_date, final_state, portfolio=None):
+    def record_decision(self, company_name, trade_date, final_state, portfolio=None,
+                        run_registry=None):
         """Record a finished run: its state log, and its decision in the memory log
         for reflection on the next same-ticker run. propagate() and the CLI both end here.
 
@@ -457,10 +458,15 @@ class TradingAgentsGraph:
         cap are fractions of the account's equity, so without a book the engine
         refuses to size rather than inventing one. An unknown book is never
         treated as a flat one.
+
+        ``run_registry`` is the registry the agents already populated. Passing it
+        here is what makes the gate certify the *same* records the analysts were
+        given, rather than rebuilding a second set from the finished state.
         """
         self._log_state(trade_date, final_state)
         self._evaluate_reliability(company_name, trade_date, final_state,
-                                   portfolio=portfolio)
+                                   portfolio=portfolio,
+                                   run_registry=run_registry)
         decision = final_state.get("final_trade_decision")
         if not decision:
             logger.warning("No final decision for %s on %s; nothing added to the memory log",
@@ -472,7 +478,7 @@ class TradingAgentsGraph:
         )
 
     def _evaluate_reliability(self, company_name, trade_date, final_state,
-                              portfolio=None):
+                              portfolio=None, run_registry=None):
         """Run the decision through the Execution Gate and write the audit.
 
         Best-effort by design: a reliability-layer failure must not lose the
@@ -492,11 +498,16 @@ class TradingAgentsGraph:
         used_end = used_period_end_from_report(
             final_state.get("fundamentals_report")
         )
-        # §3: a registry belongs to THIS run. Built here, attached here,
-        # discarded with the analysis — a process-wide one would let one
-        # analysis certify another's figures.
-        registry = self._build_metric_registry(company_name, trade_date,
-                                               final_state)
+        # §3: a registry belongs to THIS run. When the run already carried one —
+        # bound across the analysis so the tools could read it — that is the one
+        # the gate must certify: a second, rebuilt registry would be a different
+        # set of records from the figures the analysts were given.
+        if run_registry is not None:
+            registry = self._complete_run_registry(run_registry, final_state,
+                                                   company_name, trade_date)
+        else:
+            registry = self._build_metric_registry(company_name, trade_date,
+                                                   final_state)
         # §2 of P4: one id shared by the audit and the run record, minted once
         # per analysis so the two files can be matched and neither can collide
         # with another run of the same instrument on the same day.
@@ -637,6 +648,37 @@ class TradingAgentsGraph:
                          company_name, trade_date, exc_info=True)
             return None
 
+    def _complete_run_registry(self, run_registry, final_state, company_name,
+                               trade_date):
+        """Finish the registry the run already populated.
+
+        The tools registered what the analysts computed; the run's own figures
+        (revenue, equity, the share counts) arrive in the state only once the
+        agents have finished. This adds those, so the gate sees one registry
+        holding both — not a rebuilt one that discards what the tools recorded.
+
+        A failure here leaves the tool-computed records intact rather than
+        returning nothing: a partial registry is honest, an empty one is not.
+        """
+        try:
+            from tradingagents.dataflows.math.extraction import extract_run_inputs
+            from tradingagents.dataflows.math.run_registry import (
+                build_run_registry,
+                registry_inputs_from_state,
+            )
+
+            extracted = extract_run_inputs(final_state)
+            inputs = registry_inputs_from_state(final_state)
+            inputs = _merge_extracted(inputs, extracted.inputs)
+            state_registry = build_run_registry(
+                inputs, run_id=f"{company_name}-{trade_date}")
+            for record in state_registry._records.values():  # noqa: SLF001
+                run_registry.register(record)
+        except Exception:  # noqa: BLE001 — keep what the tools already recorded
+            logger.debug("Could not complete the run registry for %s on %s",
+                         company_name, trade_date, exc_info=True)
+        return run_registry
+
     def _known_filings(self, ticker: str, trade_date: str) -> list | None:
         """The authoritative filings known at the analysis date, point-in-time.
 
@@ -670,27 +712,46 @@ class TradingAgentsGraph:
 
         # None resumes an existing checkpoint; init_agent_state starts fresh (#1249).
         graph_input = self.checkpoint_input(init_agent_state)
-        if self.debug:
-            # A state repeats the messages before it, so each prints once (#1027).
-            final_state, printed = {}, set()
-            for messages, state in self.stream_run(graph_input, **args):
-                for msg in messages:
-                    key = getattr(msg, "id", None) or (type(msg).__name__, getattr(msg, "content", None))
-                    if key not in printed:
-                        printed.add(key)
-                        msg.pretty_print()
-                if state is not None:
-                    final_state.update(state)
-        else:
-            final_state = self.graph.invoke(graph_input, **args)
+        # §Task C of P1's R2: the registry exists for the *whole* run, bound
+        # before the agents start, so a tool call during the analysis reads the
+        # same registry the gate later certifies against. Creating it only at
+        # `record_decision` meant every `get_certified_metric` answered
+        # UNSUPPORTED while the agent was working.
+        #
+        # The binding is inline rather than in a helper: a caller drives this
+        # method directly (`partial(TradingAgentsGraph._run_graph, graph)`), so
+        # any `self.<helper>` it reached would resolve against that caller.
+        from tradingagents.agents.math_tools import (
+            reset_run_registry,
+            set_run_registry,
+        )
+        from tradingagents.dataflows.math.registry import MetricRegistry
+        run_registry = MetricRegistry(run_id=f"{company_name}-{trade_date}")
+        token = set_run_registry(run_registry)
+        try:
+            if self.debug:
+                # A state repeats the messages before it, so each prints once (#1027).
+                final_state, printed = {}, set()
+                for messages, state in self.stream_run(graph_input, **args):
+                    for msg in messages:
+                        key = getattr(msg, "id", None) or (type(msg).__name__, getattr(msg, "content", None))
+                        if key not in printed:
+                            printed.add(key)
+                            msg.pretty_print()
+                    if state is not None:
+                        final_state.update(state)
+            else:
+                final_state = self.graph.invoke(graph_input, **args)
 
-        self.record_decision(company_name, trade_date, final_state,
-                             portfolio=portfolio)
+            self.record_decision(company_name, trade_date, final_state,
+                                 portfolio=portfolio, run_registry=run_registry)
 
-        # Clear checkpoint on successful completion to avoid stale state.
-        self.clear_checkpoint_on_success(company_name, trade_date, asset_type, portfolio)
+            # Clear checkpoint on successful completion to avoid stale state.
+            self.clear_checkpoint_on_success(company_name, trade_date, asset_type, portfolio)
 
-        return final_state, run_rating(final_state)
+            return final_state, run_rating(final_state)
+        finally:
+            reset_run_registry(token)
 
     def stream_run(self, graph_input, **args):
         """Stream a run as ``(messages, state)`` pairs.

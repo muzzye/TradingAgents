@@ -19,6 +19,9 @@ which is the defect this work removes.
 from __future__ import annotations
 
 import json
+import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Annotated, Literal
 
 from langchain_core.tools import tool
@@ -71,9 +74,28 @@ from tradingagents.dataflows.math.valuation import (
     return_on_equity,
 )
 
+logger = logging.getLogger(__name__)
 
 def _payload(record) -> str:
-    """Serialize a ``MetricRecord`` as the tool's JSON answer."""
+    """Serialize a ``MetricRecord`` as the tool's JSON answer, and keep it.
+
+    Every ``calculate_*`` tool answers through here, so this is the one place a
+    tool's computation enters the run's registry. Without it a value the agent
+    had legitimately computed was returned to the model and then lost: the gate
+    rebuilt its registry from state and prose, and the engine had to recompute
+    what the agent had already been told (§Task C of the audit's R2).
+
+    Best-effort by design: a registry that cannot record must not fail the tool
+    call the agent is waiting on, so a failure here is logged at debug and the
+    answer still goes back.
+    """
+    registry = _run_registry()
+    if registry is not None:
+        try:
+            registry.register(record)
+        except Exception:  # noqa: BLE001 — the agent's answer comes first
+            logger.debug("Could not record %s in the run registry",
+                         getattr(record, "metric", "?"), exc_info=True)
     return json.dumps(record.summary(), ensure_ascii=False)
 
 
@@ -670,20 +692,56 @@ def get_certified_metric(
     return _payload(record)
 
 
-# The run's registry, attached by the graph before the agents run. A module
-# global is deliberate: the tool functions are invoked by LangGraph without a
-# handle to the run, and a per-run dict keyed by run id would be no safer.
-_REGISTRY: MetricRegistry | None = None
+# The run's registry, bound by the graph for the length of that run.
+#
+# A ``ContextVar`` rather than a module global, and the difference matters twice
+# over. A global is shared by every analysis in a process, so the console — which
+# runs several at once — would let one analysis's registry answer another's tool
+# calls; the P1 audit reproduced exactly that leak. And a global survives the run
+# that set it, so the *next* analysis reads stale metrics until overwritten.
+#
+# LangGraph carries the context into tool calls, which is the same mechanism
+# ``dataflows/config`` uses for the run's vendors.
+_run_registry_var: ContextVar[MetricRegistry | None] = ContextVar(
+    "tradingagents_run_registry", default=None)
 
 
 def _run_registry() -> MetricRegistry | None:
-    return _REGISTRY
+    """The registry of the run in progress, or ``None`` outside one."""
+    return _run_registry_var.get()
 
 
 def set_run_registry(registry) -> None:
-    """Attach this run's metric registry so the tools can read it."""
-    global _REGISTRY
-    _REGISTRY = registry
+    """Bind this run's metric registry so the tools can read it.
+
+    Called by the graph at the start of a run, so the analysts can quote
+    certified figures while they work — not only afterwards, when the gate
+    recomputes them. The return value is a token for ``reset_run_registry``.
+    """
+    return _run_registry_var.set(registry)
+
+
+def reset_run_registry(token) -> None:
+    """Undo a ``set_run_registry``, restoring the previous binding.
+
+    A run that ends must not leave its registry readable to whatever runs next
+    in the same context.
+    """
+    _run_registry_var.reset(token)
+
+
+@contextmanager
+def certified_registry(registry):
+    """Bind ``registry`` for the duration of a block, then restore.
+
+    The graph wraps a run in this; a test wraps a single tool call. Either way
+    the binding cannot outlive its scope.
+    """
+    token = set_run_registry(registry)
+    try:
+        yield registry
+    finally:
+        reset_run_registry(token)
 
 
 MATH_TOOLS = [

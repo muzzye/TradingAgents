@@ -32,9 +32,9 @@ from tradingagents.agents.math_tools import (
     calculate_stop_distance,
     calculate_stop_for_atr,
     calculate_valuation_ratio,
+    certified_registry,
     convert_money_unit,
     get_certified_metric,
-    set_run_registry,
     validate_market_bar,
     validate_market_series,
     validate_stated_percentage,
@@ -399,8 +399,8 @@ class TestToolContract:
 
 class TestCertifiedMetricLookup:
     def test_an_uncomputed_metric_is_unverified_and_blocks(self):
-        set_run_registry(MetricRegistry(run_id="t"))
-        payload = _json(get_certified_metric, metric_name="price_to_book")
+        with certified_registry(MetricRegistry(run_id="t")):
+            payload = _json(get_certified_metric, metric_name="price_to_book")
         assert payload["source_status"] == "MISSING"
         assert payload["value"] is None
         assert payload["blocks_decision"] is True
@@ -410,8 +410,8 @@ class TestCertifiedMetricLookup:
 
         registry = MetricRegistry(run_id="t")
         registry.register(metric("price_to_book", "1.5877", formula_id="price_div_bvps"))
-        set_run_registry(registry)
-        payload = _json(get_certified_metric, metric_name="price_to_book")
+        with certified_registry(registry):
+            payload = _json(get_certified_metric, metric_name="price_to_book")
         assert payload["value"] == "1.5877"
         assert payload["calculation_status"] == "VERIFIED"
 
@@ -420,8 +420,8 @@ class TestCertifiedMetricLookup:
         registry.register(check_stated_multiple(
             "price_to_book", "1.35", BRK_PRICE, "385.70",
             formula_id="price_div_bvps").record)
-        set_run_registry(registry)
-        payload = _json(get_certified_metric, metric_name="price_to_book")
+        with certified_registry(registry):
+            payload = _json(get_certified_metric, metric_name="price_to_book")
         # It is reported, with its status, but never as a verified value.
         assert payload["calculation_status"] == "MISMATCH"
         assert registry.value("price_to_book") is None
