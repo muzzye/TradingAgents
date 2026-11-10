@@ -594,3 +594,193 @@ class TestItalianMultiples:
         validation = validate_analyst_report(
             "P/B 1,49x", agent="fundamentals", registry=registry)
         assert validation.blocks_decision is True
+
+
+# ===========================================================================
+# Final review — production wiring, SEC coherence, LLM precedence
+# ===========================================================================
+def _filing(*, equity=761_368_000_000.0, end="2026-09-30",
+            filed="2026-11-09", shares_a=550_000, shares_b=1_400_000_000,
+            ratio=1500.0, equity_tag="StockholdersEquity",
+            shares_a_end=None, shares_b_end=None, ratio_filed=None):
+    """A companyfacts payload with the named facts, shaped as SEC returns it."""
+    shares_a_end = shares_a_end or end
+    shares_b_end = shares_b_end or end
+    facts: dict = {equity_tag: {"units": {"USD": [
+        {"val": equity, "end": end, "start": "2026-07-01", "filed": filed,
+         "form": "10-Q", "accn": "0001"}]}}}
+    if shares_a is not None:
+        facts["CommonStockClassASharesOutstanding"] = {"units": {"shares": [
+            {"val": shares_a, "end": shares_a_end, "filed": filed,
+             "form": "10-Q"}]}}
+    if shares_b is not None:
+        facts["CommonStockClassBSharesOutstanding"] = {"units": {"shares": [
+            {"val": shares_b, "end": shares_b_end, "filed": filed,
+             "form": "10-Q"}]}}
+    if ratio is not None:
+        facts["ExchangeRatioOfClassACommonStockToClassBCommonStock"] = {
+            "units": {"pure": [{"val": ratio,
+                                "filed": ratio_filed or filed}]}}
+    return {"facts": {"us-gaap": facts}}
+
+
+class TestSECAccountingCoherence:
+    """B — the filing must agree with itself before a BVPS is certified."""
+
+    def _extract(self, payload, as_of=None):
+        from tradingagents.dataflows.fundamentals import extract_sec_accounting
+
+        return extract_sec_accounting(payload, cik="0001067983",
+                                      as_of_date=as_of)
+
+    def test_2_a_filing_after_the_analysis_date_is_excluded(self):
+        result = self._extract(_filing(filed="2026-12-01"), as_of="2026-11-10")
+        assert result.validation_status == "UNVERIFIED"
+        assert result.book_value_per_share is None
+        assert "equity" in result.rejection_reason.lower()
+
+    def test_a_filing_on_the_analysis_date_is_usable(self):
+        result = self._extract(_filing(filed="2026-11-10"), as_of="2026-11-10")
+        assert result.validation_status == "VERIFIED"
+        assert result.book_value_per_share is not None
+
+    def test_3_share_counts_from_another_period_are_refused(self):
+        result = self._extract(_filing(shares_b_end="2026-06-30"),
+                               as_of="2026-11-10")
+        assert result.validation_status == "UNVERIFIED"
+        assert result.book_value_per_share is None
+        assert "period" in result.rejection_reason.lower()
+
+    def test_4_inclusive_equity_is_not_attributable_equity(self):
+        """The noncontrolling-interest concept is a different measure."""
+        result = self._extract(_filing(
+            equity_tag="StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"),
+            as_of="2026-11-10")
+        assert result.book_value_per_share is None
+        assert result.validation_status == "UNVERIFIED"
+
+    def test_5_a_missing_ratio_is_not_certified(self):
+        result = self._extract(_filing(ratio=None), as_of="2026-11-10")
+        assert result.validation_status == "UNVERIFIED"
+        assert "ratio" in result.rejection_reason.lower()
+
+    def test_5b_a_zero_or_negative_ratio_is_not_certified(self):
+        for bad in (0.0, -1500.0):
+            result = self._extract(_filing(ratio=bad), as_of="2026-11-10")
+            assert result.validation_status == "UNVERIFIED", bad
+            assert result.book_value_per_share is None
+
+    def test_a_non_currency_equity_unit_is_ignored(self):
+        """A 'shares' figure cannot be equity."""
+        payload = _filing()
+        payload["facts"]["us-gaap"]["StockholdersEquity"]["units"] = {
+            "shares": [{"val": 761_368_000_000, "end": "2026-09-30",
+                        "filed": "2026-11-09"}]}
+        result = self._extract(payload, as_of="2026-11-10")
+        assert result.book_value_per_share is None
+
+
+class TestLLMPrecedence:
+    """C — a filing's BVPS is not a claim because a report repeats it."""
+
+    def _state(self, bvps_text: str, *, sec_equity: bool):
+        from tradingagents.dataflows.fundamentals import extract_sec_accounting
+
+        state = {"fundamentals_report": bvps_text,
+                 "verified_market_snapshot": {
+                     "close": EOD_CLOSE,
+                     "price_provenance": qualified_price(
+                         "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED")}}
+        if sec_equity:
+            facts = extract_sec_accounting(_filing(), as_of_date="2026-11-10")
+            state.update({
+                "equity": facts.equity,
+                "equity_period_end": facts.equity_period_end,
+                "equity_provenance": facts.equity_provenance,
+                "shares_class_a": facts.shares_class_a,
+                "shares_class_b": facts.shares_class_b,
+                "class_a_to_b_ratio": facts.class_a_to_b_ratio,
+                "book_value_per_share": facts.book_value_per_share,
+            })
+        return state
+
+    def _registry(self, state):
+        from tradingagents.dataflows.math.extraction import extract_run_inputs
+        from tradingagents.dataflows.math.run_registry import (
+            registry_inputs_from_state,
+        )
+        from tradingagents.graph.trading_graph import _merge_extracted
+
+        return build_run_registry(
+            _merge_extracted(registry_inputs_from_state(state),
+                             extract_run_inputs(state).inputs),
+            run_id="precedence")
+
+    def test_6_a_verified_bvps_survives_the_report_repeating_it(self):
+        state = self._state("Book value per share is 342.19 USD.", sec_equity=True)
+        registry = self._registry(state)
+        metric = registry.get("price_to_book")
+        assert metric.is_usable is True, metric.reason
+        assert metric.source_status.value == "VERIFIED"
+
+    def test_7_a_bvps_only_from_prose_is_not_certified(self):
+        state = self._state("Book value per share is 352.00 USD.", sec_equity=False)
+        registry = self._registry(state)
+        assert registry.get("price_to_book").is_usable is False
+
+    def test_8_a_price_without_provenance_is_refused_on_the_state_path(self):
+        from tradingagents.dataflows.math.run_registry import (
+            registry_inputs_from_state,
+        )
+
+        inputs = registry_inputs_from_state(
+            {"verified_market_snapshot": {"close": 575.25}})
+        registry = build_run_registry(inputs, run_id="no-prov")
+        assert registry.get("price_to_book").is_usable is False
+
+
+class TestProductionWiring:
+    """A — the graph the application builds gets SEC data with no injection."""
+
+    def test_1_the_node_built_without_providers_still_supplies_accounting(
+            self, monkeypatch):
+        """`create_data_quality_check()` — the shape `setup.py` uses."""
+        from tradingagents.graph import data_quality_node as module
+
+        payload = _filing()
+        # The default fetcher is what production uses; patch only the network.
+        monkeypatch.setattr(module, "_sec_companyfacts",
+                            lambda provider, ticker, date: (payload, "0001067983"))
+        monkeypatch.setattr(module, "_qualified_price_from_provider",
+                            lambda provider, ticker, date: qualified_price(
+                                ticker, EOD_CLOSE, bar_finality="EOD_CONFIRMED"))
+
+        node = module.create_data_quality_check()  # no providers, as in setup.py
+        update = node({"company_of_interest": "BRK-B",
+                       "trade_date": "2026-11-10",
+                       "fundamentals_report": ""})
+        assert update.get("equity") == pytest.approx(761_368_000_000.0)
+        assert update.get("book_value_per_share") == pytest.approx(
+            761_368_000_000 / 2_225_000_000, rel=1e-9)
+        assert update.get("equity_provenance", {}).get("validation_status") == "VERIFIED"
+
+    def test_9_a_real_mismatch_blocks_the_gate(self):
+        from tradingagents.dataflows.gate_integration import evaluate_decision
+
+        state = TestLLMPrecedence()._state(
+            "P/B of 1.49x.", sec_equity=True)
+        state.update({"company_of_interest": "BRK-B",
+                      "trade_date": "2026-11-10",
+                      "final_rating": "Overweight",
+                      "final_trade_decision": "**Rating**: Overweight\nBuy.",
+                      "trader_investment_plan":
+                          "Entry 560.00, stop 552.07, ATR 9.520."})
+        registry = TestLLMPrecedence()._registry(state)
+        record, decision = evaluate_decision(
+            "BRK-B", "2026-11-10", state, snapshot_id="blk",
+            metric_registry=registry, trigger_met=True,
+            equity=100_000.0, cash=50_000.0, risk_budget=1000.0,
+            max_symbol_exposure=0.05)
+        assert decision.creates_order is False
+        assert "SEC_REVENUE_CLAIM_MISMATCH" in [r.value for r in decision.reasons] \
+            or decision.action.value == "BLOCK"

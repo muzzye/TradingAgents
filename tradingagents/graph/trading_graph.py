@@ -80,7 +80,11 @@ def _merge_extracted(base, extracted):
 
 
 # The metrics a fully verified source may outrank prose for (FIX #1, problem B).
-_SOURCE_VERIFIED_FIELDS = ("revenue_consolidated",)
+# Fields a fully verified structured source may outrank prose for. Each is an
+# explicit exception, not a rule applied to every field: `book_value_per_share`
+# joins the list for FIX #2, because a BVPS derived from a filing is a fact and
+# the analyst restating it does not turn it back into a claim.
+_SOURCE_VERIFIED_FIELDS = ("revenue_consolidated", "book_value_per_share")
 
 
 def _verified_source_inputs(base) -> set[str]:
@@ -96,6 +100,15 @@ def _verified_source_inputs(base) -> set[str]:
     if (isinstance(provenance, dict)
             and provenance.get("validation_status") == "VERIFIED"):
         verified.add("revenue_consolidated")
+
+    # FIX #2: a book value derived from a filing is verified when the equity
+    # provenance says so AND the value exists — the provenance alone is not
+    # enough, because a rejection can leave one without the other.
+    equity_provenance = getattr(base, "equity_provenance", None) or {}
+    if (isinstance(equity_provenance, dict)
+            and equity_provenance.get("validation_status") == "VERIFIED"
+            and getattr(base, "book_value_per_share", None) is not None):
+        verified.add("book_value_per_share")
     return verified & set(_SOURCE_VERIFIED_FIELDS)
 
 

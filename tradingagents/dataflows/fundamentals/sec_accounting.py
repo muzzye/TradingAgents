@@ -16,12 +16,16 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+# Equity attributable to the parent's shareholders. The …IncludingNoncontrolling…
+# concept is a *different measure* — it adds outside ownership — and using it as
+# the denominator would understate the per-share book value. It is deliberately
+# NOT in this list: a filer that reports only the inclusive figure leaves the
+# value unverified rather than silently mixing two definitions.
 _STATEMENTS: dict[str, tuple[str, ...]] = {
     "equity": (
         "StockholdersEquity",
         "CommonStocksIncludingAdditionalPaidInCapital",
         "MembersEquity",
-        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
     ),
     "shares_class_a": (
         "CommonStockClassASharesOutstanding",
@@ -61,12 +65,23 @@ class SecAccountingFacts:
     cik: str | None = None
 
 
-def extract_sec_accounting(payload: dict, *, cik: str | None = None) -> SecAccountingFacts:
+def extract_sec_accounting(payload: dict, *, cik: str | None = None,
+                          as_of_date: str | None = None) -> SecAccountingFacts:
     """From a companyfacts payload to accounting facts (FIX #2).
 
     Reads ``facts.us-gaap`` (or the bare tag map of a fixture) and returns a
-    certified accounting bundle. Every fact carries a provenance so the audit
-    can point at the filing it came from.
+    certified accounting bundle.
+
+    ``as_of_date`` is the point-in-time cutoff: a fact filed after it is a
+    filing the analysis could not have seen, so it is excluded. Passing nothing
+    means "no cutoff", which the fixture-driven tests use; production always
+    passes the trade date.
+
+    A value is ``VERIFIED`` only when every input agrees: the equity concept is
+    attributable to shareholders, its unit is a currency, the share counts and
+    the conversion ratio come from the same period, and each fact was filed on
+    or before the cutoff. Anything else yields an explicit rejection reason
+    rather than a number nobody can defend.
     """
     us_gaap = _us_gaap_facts(payload)
     if not us_gaap:
@@ -88,8 +103,18 @@ def extract_sec_accounting(payload: dict, *, cik: str | None = None) -> SecAccou
     for kind, tags in _STATEMENTS.items():
         for tag in tags:
             for unit_label, facts in (us_gaap.get(tag) or {}).get("units", {}).items():
+                # A share count is in shares, a ratio is dimensionless, equity
+                # is money. Reading a "shares" count as dollars would multiply
+                # the book value by a thousand.
+                if kind == "equity" and unit_label not in ("USD", "EUR", "GBP"):
+                    continue
                 for fact in facts:
                     if fact.get("val") is None:
+                        continue
+                    filed = fact.get("filed")
+                    if as_of_date and filed and str(filed) > str(as_of_date):
+                        # Filed after the analysis date: the market had not
+                        # seen it, so the run cannot use it.
                         continue
                     recorded = {
                         "value": float(fact["val"]),
@@ -127,9 +152,15 @@ def extract_sec_accounting(payload: dict, *, cik: str | None = None) -> SecAccou
         "validation_status": "VERIFIED",
     }
 
-    shares_a = _pick(validated.get("shares_class_a"))
-    shares_b = _pick(validated.get("shares_class_b"))
-    ratio = _pick_ratio(us_gaap, _STATEMENTS["class_a_to_b_ratio"])
+    shares_a_fact = _pick_fact(validated.get("shares_class_a"))
+    shares_b_fact = _pick_fact(validated.get("shares_class_b"))
+    ratio_fact = _pick_ratio_fact(us_gaap, _STATEMENTS["class_a_to_b_ratio"],
+                                  as_of_date=as_of_date)
+
+    shares_a = shares_a_fact["value"] if shares_a_fact else None
+    shares_b = shares_b_fact["value"] if shares_b_fact else None
+    ratio = ratio_fact["value"] if ratio_fact else None
+
     if shares_a is None or shares_b is None or ratio is None:
         return SecAccountingFacts(
             equity=equity, equity_period_end=equity_period_end, equity_provenance=provenance,
@@ -137,6 +168,39 @@ def extract_sec_accounting(payload: dict, *, cik: str | None = None) -> SecAccou
             book_value_per_share=None, book_value_period_end=equity_period_end,
             cik=cik, validation_status="UNVERIFIED",
             rejection_reason="share counts or conversion ratio missing in filing",
+        )
+
+    # The share counts must describe the same moment as the equity, or the
+    # book value divides one period's equity by another's shares. A count is an
+    # instant fact, so it carries an `end` but no `start`; requiring the same
+    # `end` as the equity is what keeps the two comparable.
+    for name, fact in (("class A", shares_a_fact), ("class B", shares_b_fact)):
+        if fact.get("end") and equity_period_end \
+                and str(fact["end"]) != str(equity_period_end):
+            return SecAccountingFacts(
+                equity=equity, equity_period_end=equity_period_end,
+                equity_provenance=provenance,
+                shares_class_a=shares_a, shares_class_b=shares_b,
+                class_a_to_b_ratio=ratio, book_value_per_share=None,
+                book_value_period_end=equity_period_end, cik=cik,
+                validation_status="UNVERIFIED",
+                rejection_reason=(
+                    f"the {name} share count is for {fact['end']} while the "
+                    f"equity is for {equity_period_end}: different periods "
+                    "cannot form one book value"),
+            )
+
+    # A conversion ratio must be positive and finite; a zero or negative one
+    # would make the equivalent share count meaningless.
+    if not isinstance(ratio, (int, float)) or ratio <= 0:
+        return SecAccountingFacts(
+            equity=equity, equity_period_end=equity_period_end,
+            equity_provenance=provenance,
+            shares_class_a=shares_a, shares_class_b=shares_b,
+            class_a_to_b_ratio=ratio, book_value_per_share=None,
+            book_value_period_end=equity_period_end, cik=cik,
+            validation_status="UNVERIFIED",
+            rejection_reason=f"the A/B conversion ratio {ratio!r} is not usable",
         )
 
     b_equivalent = shares_b + shares_a * ratio
@@ -157,23 +221,37 @@ def extract_sec_accounting(payload: dict, *, cik: str | None = None) -> SecAccou
     )
 
 
-def _pick(facts: list[dict] | None) -> float | None:
+def _pick_fact(facts: list[dict] | None) -> dict | None:
+    """The latest fact, preferring one that states when it was filed."""
     if not facts:
         return None
     with_filed = [f for f in facts if f.get("filed")]
     candidates = with_filed if with_filed else facts
-    return float(max(candidates, key=lambda f: f["filed"] if f.get("filed") else "")["value"])
+    return max(candidates, key=lambda f: f["filed"] if f.get("filed") else "")
 
 
-def _pick_ratio(us_gaap: dict, tags: tuple[str, ...]) -> float | None:
+def _pick(facts: list[dict] | None) -> float | None:
+    fact = _pick_fact(facts)
+    return None if fact is None else float(fact["value"])
+
+
+def _pick_ratio_fact(us_gaap: dict, tags: tuple[str, ...],
+                     *, as_of_date: str | None = None) -> dict | None:
+    """The conversion ratio as a fact, honouring the point-in-time cutoff."""
     for tag in tags:
         entry = us_gaap.get(tag)
         if not isinstance(entry, dict):
             continue
-        for fact in (entry.get("units") or {}).values():
-            for item in fact:
-                if item.get("val") is not None:
-                    return float(item["val"])
+        for unit_label, items in (entry.get("units") or {}).items():
+            for item in items:
+                if item.get("val") is None:
+                    continue
+                filed = item.get("filed")
+                if as_of_date and filed and str(filed) > str(as_of_date):
+                    continue
+                return {"value": float(item["val"]), "unit": unit_label,
+                        "filed": filed, "end": item.get("end"),
+                        "concept": tag}
     return None
 
 

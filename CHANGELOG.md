@@ -19,6 +19,28 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.17] — 2026-11-10
+
+### Fixed
+
+- **The production graph now gets the SEC accounting facts.** `setup.py` builds
+  the Data Quality Check node as `create_data_quality_check()` with no
+  providers, and the accounting block skipped itself when none was given — so a
+  real run never saw an equity figure and the P/B stayed `NOT_COMPUTABLE`. The
+  revenue and accounting paths now share one SEC fetcher
+  (`_sec_companyfacts`), so both use the same cached, point-in-time call.
+- **A book value is certified only when the filing agrees with itself.** The
+  extraction now excludes facts filed after the analysis date, reads only
+  currency-unit equity, refuses the noncontrolling-interest concept (a different
+  measure from attributable equity), requires the share counts to end on the
+  equity's period, and rejects a missing, zero or negative A/B ratio. Each
+  refusal carries the reason.
+- **A filing's BVPS is not a claim because a report repeats it.**
+  `_merge_extracted` now exempts `book_value_per_share` from `claimed_inputs`
+  when its provenance is `VERIFIED` and the value exists — the same scoped
+  exception revenue already had, and only for that field. A BVPS with no
+  verified provenance stays a claim.
+
 ## [0.8.16] — 2026-11-10
 
 ### Fixed

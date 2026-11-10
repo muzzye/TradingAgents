@@ -77,6 +77,11 @@ class RunInputs:
     # quarter five months earlier is not wrong arithmetic — it is two different
     # moments divided by each other, and the report must be able to say which.
     equity_period_end: str | None = None
+    # Where the equity and the book value came from (FIX #2). A filing that
+    # states attributable equity, both share counts and a conversion ratio
+    # produces a VERIFIED provenance; anything else leaves the book value
+    # unverified, and a model restating the number does not change that.
+    equity_provenance: dict | None = None
     # A market capitalisation the report itself states, when it does (§2 of P4).
     # Kept separate from ``price * shares`` on purpose: the two are the same
     # number only when the report used the same share count and the same
@@ -686,6 +691,10 @@ def registry_inputs_from_state(state: dict) -> RunInputs:
         market_cap_reported=_num(state.get("market_cap_reported")),
         equity_period_end=(state.get("equity_period_end")
                            or snapshot.get("equity_period_end") or None),
+        equity_provenance=(
+            state.get("equity_provenance")
+            if isinstance(state.get("equity_provenance"), dict) else None
+        ),
         shares_class_a=_num(state.get("shares_class_a")),
         shares_class_b=_num(state.get("shares_class_b")),
         class_a_to_b_ratio=_num(state.get("class_a_to_b_ratio")),

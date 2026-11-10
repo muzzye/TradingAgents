@@ -75,23 +75,24 @@ def create_data_quality_check(filings_provider=None, sec_facts_provider=None,
         # numerator and denominator rather than from prose.
         from tradingagents.dataflows.fundamentals import extract_sec_accounting
 
+        # The accounting facts use the same SEC fetch as the revenue: one
+        # cached, point-in-time call, whichever provider the node was built
+        # with. Without this the production graph — which builds the node with
+        # no provider — never saw an equity figure at all.
         accounting = None
-        if sec_facts_provider is not None:
+        accounting_payload, accounting_cik = _sec_companyfacts(
+            sec_facts_provider, ticker, trade_date)
+        if isinstance(accounting_payload, dict):
             try:
-                payload = sec_facts_provider(ticker, trade_date)
-                if isinstance(payload, dict):
-                    accounting = extract_sec_accounting(
-                        payload,
-                        cik=(payload.get("cik")
-                             or payload.get("facts", {}).get("cik")
-                             or payload.get("cik_str")),
+                accounting = extract_sec_accounting(
+                    accounting_payload, cik=accounting_cik,
+                    as_of_date=trade_date)
+                if accounting.validation_status != "VERIFIED":
+                    logger.warning(
+                        "SEC accounting is UNVERIFIED for %s (%s)",
+                        ticker, accounting.rejection_reason,
                     )
-                    if accounting.validation_status != "VERIFIED":
-                        logger.warning(
-                            "SEC accounting is UNVERIFIED for %s (%s)",
-                            ticker, accounting.rejection_reason,
-                        )
-            except Exception:  # noqa: BLE001 — provider unavailable is not tolerated
+            except Exception:  # noqa: BLE001 — unreadable payload certifies nothing
                 logger.exception(
                     "SEC accounting extraction failed for %s", ticker)
 
@@ -142,6 +143,7 @@ def create_data_quality_check(filings_provider=None, sec_facts_provider=None,
                 ("shares_class_b", accounting.shares_class_b),
                 ("class_a_to_b_ratio", accounting.class_a_to_b_ratio),
                 ("book_value_per_share", accounting.book_value_per_share),
+                ("equity_provenance", accounting.equity_provenance or None),
             ):
                 if value is not None:
                     update[field_name] = value
@@ -301,6 +303,35 @@ def _revenue_from_report(report: str | None) -> float | None:
     return value
 
 
+def _sec_companyfacts(provider, ticker: str, trade_date: str):
+    """The raw ``companyfacts`` payload and the CIK, or ``(None, None)``.
+
+    One fetcher for every SEC-derived input (revenue, equity, share counts):
+    the same cached call the freshness check makes, the same point-in-time
+    rules. A caller that supplies a provider bypasses the network; the default
+    reads SEC EDGAR.
+    """
+    try:
+        if provider is not None:
+            payload = provider(ticker, trade_date)
+            cik = None
+            if isinstance(payload, dict):
+                cik = (payload.get("cik") or payload.get("cik_str")
+                       or (payload.get("facts") or {}).get("cik"))
+            return payload, cik
+        from tradingagents.dataflows.vendors import sec_edgar
+
+        cik = sec_edgar.cik_for(ticker)
+        if cik is None:
+            return None, None
+        payload = sec_edgar._cached_json(
+            sec_edgar._FACTS_URL.format(cik=cik), f"CIK{cik}.json")
+        return payload, cik
+    except Exception:  # noqa: BLE001 — an unavailable source is not a pass
+        logger.debug("SEC facts unavailable for %s", ticker, exc_info=True)
+        return None, None
+
+
 def _revenue_inputs_from_provider(provider, ticker: str, trade_date: str):
     """The filing's consolidated revenue, or ``None``.
 
@@ -314,21 +345,8 @@ def _revenue_inputs_from_provider(provider, ticker: str, trade_date: str):
         revenue_inputs_from_sec,
     )
 
-    payload = None
-    cik = None
-    try:
-        if provider is not None:
-            payload = provider(ticker, trade_date)
-        else:
-            from tradingagents.dataflows.vendors import sec_edgar
-
-            cik = sec_edgar.cik_for(ticker)
-            if cik is None:
-                return None
-            payload = sec_edgar._cached_json(
-                sec_edgar._FACTS_URL.format(cik=cik), f"CIK{cik}.json")
-    except Exception:  # noqa: BLE001 — an unavailable source is not a pass
-        logger.debug("SEC facts unavailable for %s", ticker, exc_info=True)
+    payload, cik = _sec_companyfacts(provider, ticker, trade_date)
+    if payload is None:
         return None
 
     try:

@@ -85,7 +85,8 @@ class AgentState(MessagesState):
 
     # Accounting denominators from SEC filings (equity attributable, share counts,
     # ratio and period end). Declared so the pricing path stays certified.
-    equity: Annotated[float | None, "Shareholders' equity from the filing"]
+    equity: Annotated[float | None, "Shareholders' equity attributable to common shareholders, from the filing"]
+    equity_provenance: Annotated[dict | None, "Where equity and the book value came from: concept, accession, period, CIK, unit, validation status"]
     equity_period_end: Annotated[str | None, "Period end of the equity figure (e.g., 2026-09-30)"]
     shares_class_a: Annotated[float | None, "Class A share count"]
     shares_class_b: Annotated[float | None, "Class B share count"]
