@@ -386,12 +386,15 @@ def build_run_registry(inputs: RunInputs, *, run_id: str = "") -> MetricRegistry
     # is not a market price" while the P/E, from the identical number, was
     # certified. That is the defect this guard closes.
     #
-    # What it does *not* close: the report validator extracts P/B claims but
-    # not P/E ones, so an analyst quoting the indicator-derived P/E raises no
-    # NUMERIC_CLAIM_MISMATCH of its own. Removing the certified figure is what
-    # this fix offers — there is no longer a VERIFIED multiple such a claim
-    # could rest on — and closing the extraction gap is separate work. Do not
-    # read this guard as making a reported P/E claim block.
+    # What it does *not* do: this guard removes a figure, it does not judge a
+    # report's claim about one. Reading a reported P/E and comparing it to
+    # `pe_trailing` is FIX #4's job, in `claims.py`. Before that fix the parser
+    # matched P/B and never P/E, so an analyst could state any trailing multiple
+    # with no finding; now such a claim is extracted and checked, and because
+    # this guard refuses an indicator-derived P/E there is nothing certified for
+    # it to match — the claim comes out NOT_CHECKABLE, which is the honest
+    # outcome and the reason a refused metric must not be resurrected as a
+    # baseline elsewhere.
     if inputs.price is not None and inputs.eps_ttm is not None \
             and inputs.weighted_average_shares:
         if not price_is_qualified(inputs):

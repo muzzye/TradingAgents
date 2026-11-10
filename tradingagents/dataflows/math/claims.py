@@ -74,6 +74,23 @@ class ClaimVerdict(StrEnum):
 PCT_TOLERANCE = Decimal("0.1")
 # Default tolerance for a multiple (1.35 vs 1.4801 is far beyond).
 MULTIPLE_TOLERANCE = Decimal("0.02")
+# FIX #4: a multiple's tolerance must scale with its magnitude. An absolute
+# 0.02 is calibrated for a P/B near 1.6, where it allows a two-decimal
+# rounding. Applied to a P/E near 25 it rejects a report that rounds 25.4375
+# to the correct 25.4 — a difference of 0.0375, which is 0.15% and no
+# contradiction at all. The rule is therefore "absolute floor OR one percent",
+# whichever is larger: small multiples keep the tight check they need, large
+# ones get the tolerance their own rounding requires. One percent cannot hide a
+# materially wrong figure — 18.2 against 25.4 is 28% off.
+_MULTIPLE_RELATIVE_TOLERANCE = Decimal("0.01")
+
+
+def _multiple_tolerance(computed: Decimal | None) -> Decimal:
+    """The permitted absolute difference for a multiple of this magnitude."""
+    if computed is None:
+        return MULTIPLE_TOLERANCE
+    return max(MULTIPLE_TOLERANCE,
+               abs(computed) * _MULTIPLE_RELATIVE_TOLERANCE)
 
 
 @dataclass(frozen=True)
@@ -159,7 +176,7 @@ def check_claim(claim: NumericClaim, computed: Any, *,
     claimed_d = as_decimal(claim.value)
     is_pct = claim.unit in ("percent", "percentage_points")
     tol = (as_decimal(tolerance) if tolerance is not None
-           else (PCT_TOLERANCE if is_pct else MULTIPLE_TOLERANCE))
+           else (PCT_TOLERANCE if is_pct else _multiple_tolerance(computed_d)))
     quantum = PERCENT_QUANTUM if is_pct else RATIO_QUANTUM
 
     if computed_d is None or claimed_d is None:
@@ -226,6 +243,24 @@ def accept_non_fact(claim: NumericClaim, *, reason: str = "") -> ClaimResult:
 # capture holding the claimed figure, because a pattern may also capture a
 # window ("SMA200") whose number is not the claim: taking the last group
 # turned "4.5% above SMA200" into a claim of 200%.
+# The P/E label forms, named so the qualifier logic can locate *other* figures in
+# the same sentence without duplicating the expression. `P/E` must not be part of
+# a longer word ("P/EBITDA"), hence the lookarounds.
+_PE_LABEL_PATTERN = re.compile(
+    r"(?:trailing\s+P/?E"
+    r"|P/?E\s+trailing"
+    r"|P/?E\s+ratio"
+    r"|Price[-\s]to[-\s]Earnings(?:\s+ratio)?"
+    r"|(?<![A-Za-z])P/?E(?![A-Za-z]))"
+    r"[^.\d\n%]{0,24}?(\d+(?:[.,]\d+)?)\s*x?",
+    re.IGNORECASE)
+
+_PE_PER_PATTERN = re.compile(
+    r"\bPER\b(?=[^.\d\n]{0,30}?\b(?:multiplo|rapporto|ratio|dell['\u2019]?"
+    r"utile|prezzo[-\s]utili)\b)"
+    r"[^.\d\n%]{0,30}?(\d+(?:[.,]\d+)?)\s*x?",
+    re.IGNORECASE)
+
 _CLAIM_PATTERNS: tuple[tuple[str, re.Pattern[str], str, int], ...] = (
     # Reports write this both ways round — "11.3% below the high" and
     # "-2.63% from the high" — so both orders are matched.
@@ -246,6 +281,19 @@ _CLAIM_PATTERNS: tuple[tuple[str, re.Pattern[str], str, int], ...] = (
     ("price_to_book",
      re.compile(r"P/?B[^.\d,]{0,20}(\d+(?:[.,]\d+)?)\s*x?", re.IGNORECASE),
      "multiple", 1),
+    # FIX #4: a trailing P/E. The label must appear and the figure must be the
+    # *current trailing* multiple — not a forward one, and not one qualified by
+    # another period. Both are checked by `_pe_claim_value` on the matched text
+    # rather than by lookarounds, because "forward" may precede or follow the
+    # label ("Forward P/E of 18.2x", "P/E forward 18,2x") and a single regular
+    # expression covering both orders became unreadable and untestable.
+    ("pe_trailing", _PE_LABEL_PATTERN, "multiple", 1),
+    # `PER` is the Italian and Spanish abbreviation but also an ordinary word
+    # fragment, so it is only read as a multiple when the surrounding text names
+    # the multiple ("PER del multiplo 25,4"). Ambiguity resolves to *not* a
+    # claim, which is the safe direction: an unextracted claim is never
+    # verified, and a false positive would invent a contradiction.
+    ("pe_trailing", _PE_PER_PATTERN, "multiple", 1),
     ("stop_atr",
      re.compile(r"(\d+(?:\.\d+)?)\s*(?:x\s*)?ATR[s]?\b", re.IGNORECASE), "multiple", 1),
     ("risk_reward",
@@ -269,6 +317,166 @@ _CLAIM_PATTERNS: tuple[tuple[str, re.Pattern[str], str, int], ...] = (
          re.IGNORECASE), "percent", -1),
 )
 
+# FIX #4: a P/E claim is only comparable to `pe_trailing` when it describes the
+# same thing. Two exclusions, applied to the matched sentence rather than to the
+# pattern, because the qualifier may sit on either side of the label:
+#
+# - a *forward* multiple is a different metric the engine does not certify at
+#   all, so comparing it to the trailing value would manufacture a contradiction
+#   out of a correct statement;
+# - a P/E qualified by another period ("the 2024 P/E", "FY2025") is a historical
+#   figure, and the engine's value is the current one.
+#
+# Both resolve to "not a claim", which is the fail-closed direction: an
+# unextracted claim is never verified, whereas a false MISMATCH blocks a run
+# that said nothing wrong.
+_PE_FORWARD = re.compile(
+    r"\bforward\b|\batteso\b|\bprevisto\b|\bexpected\b|\bestimat\w*|\bprospett\w*|"
+    r"\bnext\s+(?:year|fiscal|quarter)\b|\bFY\s*20\d\d\b",
+    re.IGNORECASE)
+_PE_HISTORICAL = re.compile(
+    r"\bhistor\w*|\bstoric\w*|\bFY\s*(?:19|20)\d\d\b|\b(?:19|20)\d\d\b|"
+    r"\bpast\b|\bprevious\b|\bprecedente\b|\banno\s+scorso\b",
+    re.IGNORECASE)
+
+
+# A sentence boundary is a period/newline/semicolon **not** sitting between two
+# digits. `.` inside `25.4` is a decimal point, not a full stop: stopping there
+# The words that qualify a multiple. Used twice: to recognise a qualifier and,
+# for a comma, to decide whether it introduces one.
+_PE_QUALIFIER_WORDS = (
+    r"forward", r"atteso", r"previsto", r"expected", r"estimat\w*",
+    r"prospett\w*", r"next\s+(?:year|fiscal|quarter)", r"FY\s*20\d\d",
+    r"histor\w*", r"storic\w*", r"past", r"previous", r"precedente",
+    r"anno\s+scorso", r"trailing",
+)
+
+# A period ends the clause unless it sits between two digits, where it is a
+# decimal point. `(?<!\d)\.|\.(?!\d)` covers both sides; requiring a non-digit
+# *before* the period (an earlier version) missed `25.4. Forward ...` entirely.
+#
+# A comma is different, and that difference is the point: it separates clauses
+# *or* introduces an appositive qualifier — "P/E 18.2x, forward" is one figure
+# with a qualifier. It also has a third role as the Italian decimal mark. So a
+# comma is a boundary only when what follows it is neither a qualifier nor a
+# digit; both are checked in `_pe_suffix_end`.
+_PE_PERIOD_STOP = re.compile(r"(?<!\d)\.|\.(?!\d)")
+_PE_CLAUSE_STOP = re.compile(
+    r"[;\n]|\b(?:and|while|but|whereas)\b|(?<=\s)(?:e|ma)(?=\s)",
+    re.IGNORECASE)
+_PE_COMMA = re.compile(r",")
+_PE_QUALIFIER_AHEAD = re.compile(
+    r"\s+(?:" + "|".join(_PE_QUALIFIER_WORDS) + r")\b",
+    re.IGNORECASE)
+
+# A qualifier is short: "Forward", "(FY2024)", "— storico". These caps are a
+# backstop for prose with no punctuation at all, not the primary boundary.
+_PE_PREFIX_CAP = 20
+_PE_SUFFIX_CAP = 24
+
+
+def _pe_comma_is_decimal(text: str, index: int) -> bool:
+    """Whether the comma at ``index`` is an Italian decimal mark (`18,2`)."""
+    before = text[index - 1] if index >= 1 else ""
+    after = text[index + 1] if index + 1 < len(text) else ""
+    return before.isdigit() and after.isdigit()
+
+
+def _pe_comma_introduces_qualifier(text: str, index: int) -> bool:
+    """Whether the comma at ``index`` is followed immediately by a qualifier.
+
+    The qualifier must *describe this figure*, not start another one. In
+    `Trailing P/E 18.2x, Forward P/E 25.4x` the word after the comma is
+    `Forward` — a qualifier word, but here the label of a second claim. Treating
+    it as this figure's qualifier would exclude a correct trailing value, which
+    is the same class of defect as treating the comma as a plain boundary.
+    """
+    ahead = _PE_QUALIFIER_AHEAD.match(text, index + 1)
+    if not ahead:
+        return False
+    rest = text[ahead.end():ahead.end() + 24]
+    # "Forward P/E 25.4x" is a new figure, not a qualifier on this one.
+    return not re.match(r"\s*(?:P/?E|PER|Price[-\s]to[-\s]Earnings)\b", rest, re.I)
+
+
+def _pe_suffix_end(text: str, end: int) -> int:
+    """Where the qualifier written after a figure stops.
+
+    Each separator is judged where it appears rather than substituted into one
+    pattern, because a comma's meaning depends on what follows it: ``", forward"``
+    continues this figure, ``", Forward P/E 25.4x"`` starts another. A single
+    character class cannot express that, and treating every comma as a boundary
+    made the first case a false MISMATCH.
+    """
+    pos = end
+    limit = min(len(text), end + _PE_SUFFIX_CAP)
+    while pos < limit:
+        period = _PE_PERIOD_STOP.search(text, pos, limit)
+        clause = _PE_CLAUSE_STOP.search(text, pos, limit)
+        comma = _PE_COMMA.search(text, pos, limit)
+
+        candidates = [c.start() for c in (period, clause, comma) if c]
+        if not candidates:
+            return limit
+        here = min(candidates)
+        if comma is not None and here == comma.start():
+            if _pe_comma_is_decimal(text, here):
+                pos = here + 1          # part of the number, not a boundary
+                continue
+            if _pe_comma_introduces_qualifier(text, here):
+                pos = here + 1          # the qualifier belongs to this figure
+                continue
+            return here
+        return here
+    return limit
+
+
+def _pe_prefix_start(text: str, start: int) -> int:
+    """Where the qualifier written before a figure starts."""
+    lowest = max(0, start - _PE_PREFIX_CAP)
+    prefix_start = lowest
+    for pattern in (_PE_PERIOD_STOP, _PE_CLAUSE_STOP):
+        for separator in pattern.finditer(text, lowest, start):
+            prefix_start = max(prefix_start, separator.end())
+    for comma in _PE_COMMA.finditer(text, lowest, start):
+        if _pe_comma_is_decimal(text, comma.start()):
+            continue
+        prefix_start = max(prefix_start, comma.end())
+    closing = text.rfind(")", prefix_start, start)
+    if closing != -1:
+        prefix_start = closing + 1
+    return prefix_start
+
+
+def _pe_qualifier_scope(text: str, start: int, end: int) -> str:
+    """The text that may qualify *this* figure, on either side of it.
+
+    A qualifier describes a figure from either side, but only within the same
+    clause:
+
+    - before the label: "Forward P/E of 18.2", "FY2024 P/E 12x";
+    - between label and number: "P/E forward 18,2";
+    - after the number, bracketed, dashed or comma-apposed:
+      "P/E 18.2x (forward)", "P/E 18,2x — storico", "P/E 18.2x, forward".
+
+    The boundary is the clause separator, not a character radius. A radius
+    cannot work: `(forward) and P/E 25.4x (trailing)` puts 13 characters between
+    the two figures, so any radius reaching `(trailing)` also reaches
+    `(forward)`.
+
+    A comma needs the extra care `_pe_suffix_end` gives it: it separates clauses
+    and introduces qualifiers and is the Italian decimal mark, so it cannot be a
+    plain stop character.
+    """
+    return text[_pe_prefix_start(text, start):_pe_suffix_end(text, end)]
+
+
+def _pe_claim_value(text: str, match: re.Match[str]) -> str | None:
+    """The claimed figure, or ``None`` when the claim is not the trailing one."""
+    scope = _pe_qualifier_scope(text, match.start(), match.end())
+    if _PE_FORWARD.search(scope) or _PE_HISTORICAL.search(scope):
+        return None
+    return match.group(1)
 
 
 def _decimal_claim(raw: str | None) -> Decimal | None:
@@ -309,6 +517,10 @@ def extract_claims(text: str | None, agent: str = "unknown") -> list[NumericClai
                 # Alternation pattern: whichever branch captured wins.
                 raw = next((g for g in match.groups() if g is not None), None)
                 value = as_decimal(raw)
+            elif label == "pe_trailing":
+                # FIX #4: a forward or historical multiple is a different claim
+                # and must not be judged against the current trailing metric.
+                value = _decimal_claim(_pe_claim_value(text, match))
             else:
                 value = _decimal_claim(match.group(value_group))
             if value is None:

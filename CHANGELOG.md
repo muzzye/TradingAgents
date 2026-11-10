@@ -19,6 +19,141 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.27] — 2026-11-10
+
+### Fixed
+
+- **A comma no longer ends the clause when it introduces a qualifier.** `,` sat
+  in `_PE_QUALIFIER_STOP` as a plain character, so every comma was a boundary:
+  `P/E 18.2x, forward`, `P/E 18.2x, FY2024` and `P/E 18,2x, storico` were all
+  read as current trailing claims, and against `pe_trailing = 25.4` each
+  produced a **false MISMATCH** and blocked the order of a correct sentence.
+
+  A comma has three roles — clause separator, appositive introducer, Italian
+  decimal mark — and a character class cannot distinguish them. It is now judged
+  where it appears: a decimal when flanked by digits (`18,2`), a continuation
+  when followed by a qualifier word that does not itself label a new P/E
+  (`", forward"`), and a boundary otherwise (`", while forward outlook
+  improved"`, `", Forward P/E 25.4x"`).
+
+- **The Italian decimal comma is no longer a boundary.** `P/E 18,2x, storico`
+  previously split at the first comma, inside the number.
+
+### Changed
+
+- Corrected a comment that named `_pe_qualifier_scope` as the place the comma is
+  judged; it is judged in `_pe_suffix_end`.
+
+## [0.8.26] — 2026-11-10
+
+### Fixed
+
+- **A full stop after a decimal now ends the sentence instead of swallowing
+  the next one.** `_PE_QUALIFIER_STOP` was written as
+  `(?<![\d])\.(?![\d])`, which refuses to match a period *preceded* by a digit.
+  The condition was backwards: a period is a decimal point only when it sits
+  **between two digits**, so `P/E 25.4. Forward outlook remains positive` had no
+  boundary after the number. The following sentence's `Forward` then entered the
+  qualifier scope and excluded a correct claim — silently, so a wrong trailing
+  figure in that position also escaped the check.
+
+- **The Italian conjunctions no longer match inside `P/E`.** `\be\b` matched the
+  `E` of the label — `'The P/E 18.2x (forward)'` stopped at position 6, inside
+  the label — so the prefix was cut at the second character of the sentence. It
+  did not change the outcome for the phrasings in the test suite, because the
+  eliminator matched before the label either way, but it made the boundary
+  depend on which side of the match the letter happened to fall. `e` and `ma`
+  now require a space on both sides, which distinguishes the conjunction from
+  the letter inside a label.
+
+### Unchanged
+
+- The Italian comma decimal still reads correctly: `P/E 18,2. Forward outlook...`
+  parses as `18.2`, and the period after it separates the sentences.
+
+## [0.8.25] — 2026-11-10
+
+### Fixed
+
+- **A qualifier written *after* the figure now applies to it.** The scope
+  stopped at the end of the number, so `P/E 18.2x (forward)`,
+  `P/E 18.2x (FY2024)` and `P/E 18,2x — storico` were all read as current
+  trailing claims. Against `pe_trailing = 25.4` each produced a **false
+  MISMATCH** on a sentence that said nothing wrong, and blocked an order for it.
+
+  The scope now extends on both sides, bounded by the clause separator rather
+  than by a character radius. A radius cannot work: `(forward) and P/E 25.4x
+  (trailing)` puts 13 characters between the two figures, so any radius reaching
+  `(trailing)` also reaches `(forward)`. Separators — comma, semicolon,
+  parenthesis, sentence end, `and`/`while`/`but`/`e`/`ma` — are where prose
+  stops qualifying one figure and starts qualifying the next. A decimal point is
+  not a separator; it counts only when it is not between two digits.
+
+- Removed `_pe_sentence()`, `_pe_other_claim_spans()`, `_PE_SENTENCE_BREAK` and
+  `_PE_LABEL_PATTERNS`, left unused by the previous correction. The neighbour
+  lookup they performed is now done by the clause boundary, so keeping them
+  would have been dead code pretending to enforce something.
+
+## [0.8.24] — 2026-11-10
+
+### Fixed
+
+- **A `Forward` next to a different multiple no longer silences a correct
+  trailing claim.** `_pe_window()` selected the whole sentence and
+  `_pe_claim_value()` discarded any P/E found there if the sentence contained
+  `forward` or a historical reference. In
+  `Trailing P/E 18.2x and Forward P/E 25.4x` the `Forward` belongs to the second
+  figure, yet it excluded the first: `extract_claims()` returned `[]`, no finding
+  was produced, and with `pe_trailing = 25.4 VERIFIED` the Execution Gate
+  **proposed an order** on a report whose trailing figure was 28% wrong.
+
+  A qualifier is now attributed to the figure it actually describes. The scope
+  runs from the label — extended backwards only as far as a leading qualifier
+  can reach, one token — up to the number, so `P/E forward 18,2` and
+  `Forward P/E of 18.2` are both covered while a neighbour's qualifier is not.
+  Multiple P/E figures in one sentence are each read on their own terms, in
+  either order.
+
+- **A decimal point no longer ends the claim.** The window treated any `.` as a
+  sentence boundary, truncating `25.4` to `25`. A boundary is now a period,
+  newline or semicolon that is not between two digits.
+
+## [0.8.23] — 2026-11-10
+
+### Added
+
+- **The numeric claims validator now reads a trailing P/E.** FIX #3 removed the
+  certified figure an indicator-derived P/E could rest on and recorded the
+  remaining gap: the claims parser matched `P/B` and never `P/E`. A registry
+  holding `pe_trailing = 25.4 VERIFIED` therefore produced
+  `claims_extracted=0` for a report stating `Trailing P/E 18.2x`, and no finding
+  was raised. (The reproduction used 50.8 / 2.0 = 25.4 to keep the arithmetic
+  obvious; the tolerance correction below was found on a value that does not
+  round cleanly, 50.875 / 2.0 = 25.4375.) The parser now recognises the label in
+  English and Italian
+  (`Trailing P/E of 25.4x`, `P/E trailing pari a 25,4`,
+  `Price-to-Earnings ratio of 25.4`, and `PER` only when the surrounding text
+  names the multiple), in both decimal conventions, and compares the claim
+  against the engine's own `pe_trailing` through the existing `check_claim`
+  path — no second validation system.
+
+  A **forward** multiple (`Forward P/E of 18.2x`, `P/E atteso`) and one
+  qualified by another period (`Historical P/E`, `the 2024 P/E`, `FY2024`) are
+  deliberately not read as the current trailing claim: the engine does not
+  certify a forward P/E at all, so comparing one to the trailing value would
+  invent a contradiction out of a correct statement.
+
+### Fixed
+
+- **A multiple's tolerance now scales with its magnitude.** `MULTIPLE_TOLERANCE`
+  was a flat 0.02, calibrated for a P/B near 1.6. Applied to a P/E near 25 it
+  rejected a report that rounded 25.4375 to the correct 25.4 — a 0.15%
+  difference, and no contradiction. The permitted difference is now
+  `max(0.02, 1% of the computed value)`: small multiples keep the tight check
+  they need, large ones get the tolerance their own rounding requires. One
+  percent cannot hide a material error — 18.2 against 25.4 is 28% off and still
+  blocks.
+
 ## [0.8.22] — 2026-11-10
 
 ### Fixed

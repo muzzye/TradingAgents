@@ -183,14 +183,17 @@ class TestTheRegistryNoLongerContradictsItself:
             f"a multiple was certified from an indicator: {certified}")
 
     def test_a_reported_pe_claim_is_not_extracted_so_it_cannot_block(self):
-        """The limitation, asserted so the code comment cannot drift from it.
+        """FIX #4 closed the extraction gap this test used to guard.
 
-        `run_registry.py` documents that this fix does not make a reported P/E
-        claim block, because the validator extracts P/B claims but not P/E
-        ones. A comment is not evidence; this test is. If claim extraction is
-        later extended to P/E, this test fails and the comment must be updated
-        with it.
+        The guard existed so that a code comment could not drift from the
+        behaviour: it asserted that a reported P/E was *not* extracted, and its
+        message said to update the comment when extraction arrived. FIX #4 is
+        that change, so the assertion is inverted. What must still hold is the
+        substance: a P/E derived from an indicator is refused by the registry,
+        so the claim finds no certified value and stays `NOT_CHECKABLE` — it
+        must never come out `MATCHES` against a figure FIX #3 rejected.
         """
+        from tradingagents.dataflows.math.claims import ClaimVerdict
         from tradingagents.dataflows.math.price_source import indicator_as_price
         from tradingagents.dataflows.math.report_validation import (
             validate_analyst_report,
@@ -200,10 +203,12 @@ class TestTheRegistryNoLongerContradictsItself:
         for text in ("P/E of 77.48x.", "P/E 77,48x.", "trailing P/E 77.48x"):
             validation = validate_analyst_report(
                 text, agent="fundamentals", registry=registry)
-            extracted = len(validation.claims.results) if validation.claims else 0
-            assert extracted == 0, (
-                f"{text!r} is now extracted as a P/E claim; the known-limitation "
-                "note in run_registry.py and the CHANGELOG are now out of date")
+            results = [r for r in validation.claims.results
+                       if r.claim.label == "pe_trailing"]
+            assert len(results) == 1, f"{text!r} is no longer extracted at all"
+            assert results[0].verdict is ClaimVerdict.NOT_CHECKABLE, (
+                "an indicator-derived P/E must not certify a report's claim")
+            assert results[0].verdict is not ClaimVerdict.MATCHES
             assert validation.blocks_decision is False
 
 
