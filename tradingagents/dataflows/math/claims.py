@@ -243,6 +243,27 @@ def accept_non_fact(claim: NumericClaim, *, reason: str = "") -> ClaimResult:
 # capture holding the claimed figure, because a pattern may also capture a
 # window ("SMA200") whose number is not the claim: taking the last group
 # turned "4.5% above SMA200" into a claim of 200%.
+# The P/E label forms, named so the qualifier logic can locate *other* figures in
+# the same sentence without duplicating the expression. `P/E` must not be part of
+# a longer word ("P/EBITDA"), hence the lookarounds.
+_PE_LABEL_PATTERN = re.compile(
+    r"(?:trailing\s+P/?E"
+    r"|P/?E\s+trailing"
+    r"|P/?E\s+ratio"
+    r"|Price[-\s]to[-\s]Earnings(?:\s+ratio)?"
+    r"|(?<![A-Za-z])P/?E(?![A-Za-z]))"
+    r"[^.\d\n%]{0,24}?(\d+(?:[.,]\d+)?)\s*x?",
+    re.IGNORECASE)
+
+_PE_PER_PATTERN = re.compile(
+    r"\bPER\b(?=[^.\d\n]{0,30}?\b(?:multiplo|rapporto|ratio|dell['\u2019]?"
+    r"utile|prezzo[-\s]utili)\b)"
+    r"[^.\d\n%]{0,30}?(\d+(?:[.,]\d+)?)\s*x?",
+    re.IGNORECASE)
+
+# Every pattern that can denote a P/E figure, for neighbour detection.
+_PE_LABEL_PATTERNS = (_PE_LABEL_PATTERN, _PE_PER_PATTERN)
+
 _CLAIM_PATTERNS: tuple[tuple[str, re.Pattern[str], str, int], ...] = (
     # Reports write this both ways round — "11.3% below the high" and
     # "-2.63% from the high" — so both orders are matched.
@@ -269,26 +290,13 @@ _CLAIM_PATTERNS: tuple[tuple[str, re.Pattern[str], str, int], ...] = (
     # rather than by lookarounds, because "forward" may precede or follow the
     # label ("Forward P/E of 18.2x", "P/E forward 18,2x") and a single regular
     # expression covering both orders became unreadable and untestable.
-    ("pe_trailing",
-     re.compile(
-         r"(?:trailing\s+P/?E"
-         r"|P/?E\s+trailing"
-         r"|P/?E\s+ratio"
-         r"|Price[-\s]to[-\s]Earnings(?:\s+ratio)?"
-         r"|(?<![A-Za-z])P/?E(?![A-Za-z]))"
-         r"[^.\d\n%]{0,24}?(\d+(?:[.,]\d+)?)\s*x?",
-         re.IGNORECASE), "multiple", 1),
+    ("pe_trailing", _PE_LABEL_PATTERN, "multiple", 1),
     # `PER` is the Italian and Spanish abbreviation but also an ordinary word
     # fragment, so it is only read as a multiple when the surrounding text names
     # the multiple ("PER del multiplo 25,4"). Ambiguity resolves to *not* a
     # claim, which is the safe direction: an unextracted claim is never
     # verified, and a false positive would invent a contradiction.
-    ("pe_trailing",
-     re.compile(
-         r"\bPER\b(?=[^.\d\n]{0,30}?\b(?:multiplo|rapporto|ratio|dell['’]?"
-         r"utile|prezzo[-\s]utili)\b)"
-         r"[^.\d\n%]{0,30}?(\d+(?:[.,]\d+)?)\s*x?",
-         re.IGNORECASE), "multiple", 1),
+    ("pe_trailing", _PE_PER_PATTERN, "multiple", 1),
     ("stop_atr",
      re.compile(r"(\d+(?:\.\d+)?)\s*(?:x\s*)?ATR[s]?\b", re.IGNORECASE), "multiple", 1),
     ("risk_reward",
@@ -335,19 +343,82 @@ _PE_HISTORICAL = re.compile(
     re.IGNORECASE)
 
 
-def _pe_window(text: str, start: int, end: int) -> str:
-    """The sentence fragment around a P/E match, for the qualifier checks."""
-    left = max(0, text.rfind(".", 0, start) + 1, text.rfind("\n", 0, start) + 1)
-    stops = [i for i in (text.find(".", end), text.find("\n", end),
-                         text.find(";", end), text.find(",", end)) if i != -1]
-    right = min(stops) if stops else len(text)
-    return text[left:right]
+# A sentence boundary is a period/newline/semicolon **not** sitting between two
+# digits. `.` inside `25.4` is a decimal point, not a full stop: stopping there
+# truncated the figure to `25` and, worse, split one sentence into fragments that
+# the qualifier check then judged independently.
+_PE_SENTENCE_BREAK = re.compile(r"(?<![\d])[.\n;](?![\d])")
+
+# How far from a figure a qualifier may sit and still describe it. A multiple's
+# qualifier is adjacent ("Forward P/E of 18.2x"); a whole separate clause away it
+# belongs to another figure. Chosen over a word distance because the qualifier may
+# be a label ("P/E forward") or a prefix ("FY2024 P/E") at either side.
+_PE_LEADING_QUALIFIER_REACH = 16
+
+
+def _pe_sentence(text: str, start: int, end: int) -> tuple[int, int]:
+    """Bounds of the sentence fragment containing a P/E match."""
+    left = 0
+    for boundary in _PE_SENTENCE_BREAK.finditer(text, 0, start):
+        left = boundary.end()
+    match = _PE_SENTENCE_BREAK.search(text, end)
+    right = match.start() if match else len(text)
+    return left, right
+
+
+def _pe_other_claim_spans(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    """Spans of the *other* P/E figures in the same sentence.
+
+    A qualifier is attributed to the nearest P/E, so a neighbour's span is a wall
+    the qualifier's reach cannot cross. Without it, "Trailing P/E 18.2x and
+    Forward P/E 25.4x" excluded the first figure because of the second's
+    `Forward` — the defect this function exists to prevent.
+    """
+    spans = []
+    for pattern in _PE_LABEL_PATTERNS:
+        for other in pattern.finditer(text):
+            if other.start() == start and other.end() == end:
+                continue
+            if other.end() <= start or other.start() >= end:
+                spans.append((other.start(), other.end()))
+    return spans
+
+
+def _pe_qualifier_scope(text: str, start: int, end: int) -> str:
+    """The text that may qualify *this* figure.
+
+    Not the whole sentence: that is what let a neighbour's `Forward` silence a
+    correct trailing claim. Nor a fixed distance: `Trailing P/E 18.2x and
+    Forward P/E 25.4x` has 13 characters between the two figures, and any window
+    wide enough to catch `Price-to-Earnings ratio of 25.4` would swallow the
+    neighbour too.
+
+    A qualifier describes a figure from either side but only *adjacent* to it:
+    it sits between the label and the number ("P/E forward 18,2") or immediately
+    before the label ("Forward P/E of 18.2"). Both are captured by taking the
+    text from the label's start — extended backwards by a short span for a
+    leading qualifier — up to the figure.
+    """
+    label_start = start
+    while label_start > 0 and text[label_start - 1].isalnum():
+        label_start -= 1
+    # Backwards only as far as a leading qualifier can reach: one word plus a
+    # space ("Forward P/E", "FY2024 P/E"). A longer reach crosses into the
+    # previous clause and picks up its qualifier.
+    scope_start = max(0, label_start - _PE_LEADING_QUALIFIER_REACH)
+    head = text[scope_start:label_start]
+    if head and not head[-1].isspace():
+        # Cut mid-word: drop the partial token so a fragment of the previous
+        # figure's text cannot be read as this one's qualifier.
+        cut = len(head) - head[::-1].find(" ") if " " in head else 0
+        scope_start += cut if cut else len(head)
+    return text[scope_start:end]
 
 
 def _pe_claim_value(text: str, match: re.Match[str]) -> str | None:
     """The claimed figure, or ``None`` when the claim is not the trailing one."""
-    window = _pe_window(text, match.start(), match.end())
-    if _PE_FORWARD.search(window) or _PE_HISTORICAL.search(window):
+    scope = _pe_qualifier_scope(text, match.start(), match.end())
+    if _PE_FORWARD.search(scope) or _PE_HISTORICAL.search(scope):
         return None
     return match.group(1)
 

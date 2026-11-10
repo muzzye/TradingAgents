@@ -19,6 +19,30 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.24] — 2026-11-10
+
+### Fixed
+
+- **A `Forward` next to a different multiple no longer silences a correct
+  trailing claim.** `_pe_window()` selected the whole sentence and
+  `_pe_claim_value()` discarded any P/E found there if the sentence contained
+  `forward` or a historical reference. In
+  `Trailing P/E 18.2x and Forward P/E 25.4x` the `Forward` belongs to the second
+  figure, yet it excluded the first: `extract_claims()` returned `[]`, no finding
+  was produced, and with `pe_trailing = 25.4 VERIFIED` the Execution Gate
+  **proposed an order** on a report whose trailing figure was 28% wrong.
+
+  A qualifier is now attributed to the figure it actually describes. The scope
+  runs from the label — extended backwards only as far as a leading qualifier
+  can reach, one token — up to the number, so `P/E forward 18,2` and
+  `Forward P/E of 18.2` are both covered while a neighbour's qualifier is not.
+  Multiple P/E figures in one sentence are each read on their own terms, in
+  either order.
+
+- **A decimal point no longer ends the claim.** The window treated any `.` as a
+  sentence boundary, truncating `25.4` to `25`. A boundary is now a period,
+  newline or semicolon that is not between two digits.
+
 ## [0.8.23] — 2026-11-10
 
 ### Added

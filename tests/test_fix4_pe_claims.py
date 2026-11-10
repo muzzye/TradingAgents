@@ -356,3 +356,91 @@ def validate_analyst_report_pb(text, registry):
 
     return validate_analyst_report(
         text, agent="fundamentals", registry=registry)
+
+
+class TestQualifiersBindToTheirOwnClaim:
+    """A `Forward` next to a *different* multiple must not silence this one.
+
+    `_pe_window()` took the whole sentence, so `Trailing P/E 18.2x and Forward
+    P/E 25.4x` returned no claim at all: the `Forward` belonging to the second
+    multiple excluded the first. It also stopped the window at any `.`, which
+    truncated `25.4` to `25` — a decimal point read as a sentence end.
+    """
+
+    def _trailing(self, text):
+        return [(str(c.value)) for c in extract_claims(text, "f")
+                if c.label == "pe_trailing"]
+
+    def test_a_trailing_then_forward_yields_the_trailing(self):
+        """Case A: the trailing figure survives a neighbouring forward."""
+        assert self._trailing(
+            "Trailing P/E 18.2x and Forward P/E 25.4x.") == ["18.2"]
+
+    def test_b_forward_then_trailing_yields_the_trailing(self):
+        assert self._trailing(
+            "Forward P/E 25.4x and Trailing P/E 18.2x.") == ["18.2"]
+
+    def test_c_trailing_correct_beside_a_forward(self):
+        assert self._trailing(
+            "Trailing P/E 25.4x and Forward P/E 18.2x.") == ["25.4"]
+
+    def test_d_a_historical_neighbour_does_not_silence_the_current(self):
+        """Case D: the FY2024 figure is excluded, the current one is not."""
+        assert self._trailing(
+            "Trailing P/E 18.2x, while FY2024 P/E was 12x") == ["18.2"]
+
+    def test_e_italian_decimals_across_two_sentences(self):
+        """Case E: `18,2` and `25,4` are numbers, not sentence breaks."""
+        assert self._trailing(
+            "Trailing P/E 18,2x. Forward P/E 25,4x") == ["18.2"]
+
+    def test_a_decimal_point_does_not_end_the_claim(self):
+        """The window bug truncated `25.4` to `25`; the number must be whole."""
+        assert self._trailing("Trailing P/E 25.4x.") == ["25.4"]
+        assert self._trailing("Trailing P/E of 25.43x, per the filing") == ["25.43"]
+
+    def test_f_only_forward_yields_nothing(self):
+        assert self._trailing("Forward P/E of 25.4x") == []
+
+    def test_g_only_historical_yields_nothing(self):
+        assert self._trailing("Historical P/E of 18.2x") == []
+
+    def test_two_trailing_multiples_are_both_read(self):
+        assert self._trailing(
+            "Trailing P/E 18.2x and Trailing P/E 25.4x.") == ["18.2", "25.4"]
+
+
+class TestCaseAThroughTheGate:
+    """The mixed sentence must still reach the audit and block."""
+
+    def test_a_a_mixed_sentence_blocks_on_the_trailing_figure(self):
+        record, decision = _gate_with("Trailing P/E 18.2x and Forward P/E 25.4x.")
+        assert decision.creates_order is False
+        assert decision.action.value == "BLOCK"
+        finding = next(f for f in record.math_verdict.report.findings
+                       if f.code == "NUMERIC_CLAIM_MISMATCH")
+        assert "18.2" in finding.message or "18.2000" in finding.message
+        assert finding.blocks is True
+
+    def test_c_a_mixed_sentence_with_the_right_trailing_does_not_block(self):
+        record, decision = _gate_with("Trailing P/E 25.4x and Forward P/E 18.2x.")
+        codes = [f.code for f in record.math_verdict.report.findings]
+        assert "NUMERIC_CLAIM_MISMATCH" not in codes
+
+
+def _gate_with(text, registry=None):
+    from tradingagents.dataflows.gate_integration import evaluate_decision
+
+    state = {
+        "company_of_interest": "TEST", "trade_date": "2026-11-10",
+        "verified_market_snapshot": {"close": PRICE},
+        "fundamentals_report": text,
+        "final_rating": "Overweight",
+        "final_trade_decision": "**Rating**: Overweight\nBuy.",
+        "trader_investment_plan": "Entry 49.00, stop 46.00, ATR 1.20.",
+    }
+    return evaluate_decision(
+        "TEST", "2026-11-10", state, snapshot_id="fix4-mixed",
+        metric_registry=registry if registry is not None else _registry(),
+        trigger_met=True, equity=100_000.0, cash=50_000.0,
+        risk_budget=1000.0, max_symbol_exposure=0.05)
