@@ -69,12 +69,19 @@ def create_data_quality_check(filings_provider=None, sec_facts_provider=None):
                           [f["code"] for f in sec_reconciliation["findings"]
                            if f.get("blocks")] or ()) if sec_blocks else ()
 
+        # FIX #1: the consolidated revenue the filing states, as structured
+        # inputs for the registry. Without this the metric was populated only by
+        # a regex over the analyst's prose, so a correctly filed figure came out
+        # NOT_COMPUTABLE whenever the model worded it differently.
+        revenue_inputs = _revenue_inputs_from_provider(
+            sec_facts_provider, ticker, trade_date)
+
         logger.info(
             "Data-quality pre-check for %s on %s: blocks_execution=%s codes=%s",
             ticker, trade_date, precheck.blocks_execution or sec_blocks,
             list(precheck.blocking_codes) + list(sec_codes),
         )
-        return {
+        update = {
             "data_quality_precheck": {
                 **precheck.summary(),
                 "notice": precheck.notice(),
@@ -86,6 +93,14 @@ def create_data_quality_check(filings_provider=None, sec_facts_provider=None):
                 "sec_reconciliation": sec_reconciliation,
             },
         }
+        if revenue_inputs is not None:
+            # Written into the run's state so `registry_inputs_from_state`
+            # picks them up when the registry is built.
+            update["revenue_consolidated"] = revenue_inputs.revenue_consolidated
+            update["revenue_provenance"] = revenue_inputs.revenue_provenance
+            if revenue_inputs.revenue_prior is not None:
+                update["revenue_prior"] = revenue_inputs.revenue_prior
+        return update
 
     return data_quality_check_node
 
@@ -164,6 +179,44 @@ def _revenue_from_report(report: str | None) -> float | None:
     elif scale in ("million", "mn", "m"):
         value *= 1_000_000
     return value
+
+
+def _revenue_inputs_from_provider(provider, ticker: str, trade_date: str):
+    """The filing's consolidated revenue, or ``None``.
+
+    ``provider`` returns the raw ``companyfacts`` payload. When the node was
+    built without one, the default reads it from SEC EDGAR exactly as the
+    freshness check does — the same cached fetch, the same point-in-time rules.
+    An unavailable source yields ``None``, which leaves the metric
+    ``NOT_COMPUTABLE``: a gap is reported, never filled.
+    """
+    from tradingagents.dataflows.math.sec_revenue_inputs import (
+        revenue_inputs_from_sec,
+    )
+
+    payload = None
+    cik = None
+    try:
+        if provider is not None:
+            payload = provider(ticker, trade_date)
+        else:
+            from tradingagents.dataflows.vendors import sec_edgar
+
+            cik = sec_edgar.cik_for(ticker)
+            if cik is None:
+                return None
+            payload = sec_edgar._cached_json(
+                sec_edgar._FACTS_URL.format(cik=cik), f"CIK{cik}.json")
+    except Exception:  # noqa: BLE001 — an unavailable source is not a pass
+        logger.debug("SEC facts unavailable for %s", ticker, exc_info=True)
+        return None
+
+    try:
+        return revenue_inputs_from_sec(payload, trade_date, cik=cik)
+    except Exception:  # noqa: BLE001 — an unreadable payload certifies nothing
+        logger.debug("Could not read revenue from SEC for %s", ticker,
+                     exc_info=True)
+        return None
 
 
 def _resolve_filings(provider, ticker: str, trade_date: str):

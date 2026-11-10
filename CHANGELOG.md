@@ -19,6 +19,150 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.14] — 2026-11-10
+
+### Fixed
+
+- **A standalone sentence is a claim on the current period, whatever the line
+  above said.** `_claim_context` inherited the previous line's period whenever
+  the current line named none, so a correct `Ricavi consolidati Q3 2025: 94.972
+  milioni` silenced the contradicted `Ricavi consolidati: 74.322 milioni` on the
+  next line and the run passed — a false negative in the check that exists to
+  catch exactly that. Inheritance now requires a verifiable structural
+  association: both lines must be rows of the same Markdown table. Prose has no
+  such association, so a sentence with no period of its own is compared against
+  the certified period.
+- **An annual figure is not compared with a quarterly metric.** `FY2026`
+  measures twelve months and the certified revenue is one quarter, so comparing
+  the two numbers reported a contradiction that did not exist. Only an
+  explicitly named quarter is compared with a quarterly metric.
+
+## [0.8.13] — 2026-11-10
+
+### Fixed
+
+- **Each revenue figure is qualified by its own period.** The check read a
+  fixed 120-character window that crossed line breaks, and took the *first*
+  period it found. A correct `Ricavi consolidati Q3 2025: 94.972 milioni` on one
+  line therefore supplied the period for `Q3 2026: 74.322` on the next, and the
+  real contradiction was dropped — a sound run passed while a contradicted one
+  went unreported. The context is now the claim's own line (plus the row above
+  only when its own line names no period, which is how a table's period column
+  is read), and when a line names several periods the one nearest the figure
+  qualifies it.
+- **A two-period Markdown table is compared by column.** `| Voce | Q3 2025 |
+  Q3 2026 |` states its periods once in the header; each data cell now inherits
+  its own column's period, and only the certified column is compared. The
+  table's declared unit (`USD in millions`) is read too, so a bare `105.647`
+  cell is not compared as one hundred thousand dollars.
+
+## [0.8.12] — 2026-11-10
+
+### Fixed
+
+- **A correct prior-year revenue figure is no longer reported as a
+  contradiction.** The check excluded historical figures with a regex ending at
+  2024 (`20(?:1\d|2[0-4])`), so a report stating `Ricavi consolidati Q3 2025:
+  94.972 milioni` — accurate and correctly labelled — produced a false
+  `SEC_REVENUE_CLAIM_MISMATCH` against the certified Q3 2026 value. The period
+  is now read from the `MetricRecord`'s own `period_end` and compared
+  arithmetically with the period the sentence names, so no year is hardcoded and
+  nothing falls off the end of a list as the clock moves on. A figure with no
+  period beside it is still a claim on the current one and is still checked; a
+  figure naming another year or another quarter is not compared. The
+  spellings covered are `Q3 2025`, `2025-Q3`, `FY2025`, `Q3/2025`, a Markdown table row
+  and the Italian "anno precedente".
+
+## [0.8.11] — 2026-11-10
+
+### Fixed
+
+- **The revenue-claim check reads Italian reports, and shows both figures.**
+  Two gaps in 0.8.10. `sec_claim_reconciliation` recognised only English labels
+  and the English number convention, so an Italian report — the project's output
+  language is configurable — was never checked against the filing. The
+  recogniser now covers `ricavi`, `ricavi consolidati`, `ricavi totali` and
+  `fatturato`, the scale words `milioni`/`milione`/`mln`/`M$` and
+  `miliardi`/`miliardo`/`mld`, and Markdown table rows (`| Ricavi | 74.322 | mln |`).
+  The number parser reads both conventions — `105,647` and `105.647` are the
+  same quantity when the scale says millions — and uses the scale word to
+  disambiguate a three-digit group: `74,322 miliardi` is 74.322 billion, not
+  74,322 billion. A segment, a contract figure and a prior-period citation are
+  still not treated as claims on the consolidated total.
+- **The finding is persisted as data, not only as a reason code.**
+  `AuditRecord.revenue_claim_findings` and `RunRecord.revenue_claim_findings`
+  now carry the complete finding — code, metric, both values, period, unit,
+  agent, accession, description, severity and the blocking flag — so a reader
+  can see what was claimed and what the filing states. The certified
+  `MetricRecord` is unchanged: the finding sits beside it.
+
+## [0.8.10] — 2026-11-10
+
+### Fixed
+
+- **A report that contradicts the certified revenue is now recorded.** Runtime
+  verification of 0.8.9 found requirement #7 unmet: when the Fundamentals
+  Analyst stated a consolidated revenue different from the filing's, the
+  registry kept the filing's value — correctly — and the disagreement was
+  recorded nowhere, so a reader could not tell agreement from contradiction.
+  New `dataflows/sec_claim_reconciliation.py` compares the certified
+  `consolidated_revenue` against explicit level claims in the analysts' reports
+  and returns a structured `SEC_REVENUE_CLAIM_MISMATCH` finding carrying the
+  filing's value, the claimed value, the period, the unit, the agent, the
+  accession and the severity. The gate runs it where both the registry and the
+  reports exist — the Data Quality node cannot, because it executes in parallel
+  with the analysts and the fundamentals report is still empty.
+  The certified `MetricRecord` is never modified: the finding sits beside it,
+  and an unresolved contradiction blocks a dependent order while the diagnostic
+  report stays available.
+  Four rules keep it from firing on non-contradictions: a rate is not a level
+  claim, a figure labelled contract or segment revenue is a different quantity,
+  a figure introduced as a prior period is context, and no certified metric
+  means no comparison.
+
+## [0.8.9] — 2026-11-10
+
+### Fixed
+
+- **The SEC revenue reaches the registry through the compiled graph.** The
+  Data Quality Check node published `revenue_consolidated`, `revenue_prior` and
+  `revenue_provenance`, but `AgentState` did not declare them — and
+  `StateGraph(AgentState)` keeps only the keys its schema names, so every one of
+  them was dropped between nodes. The metric stayed `NOT_COMPUTABLE` even with a
+  valid filing. All three are now declared on the state.
+- **A verified SEC figure no longer becomes a claim because a report mentions
+  it.** `_merge_extracted` unioned `claimed_inputs` unconditionally, so a
+  fundamentals report that restated the same revenue marked
+  `revenue_consolidated` as model-asserted and the metric fell from `VERIFIED`
+  to `LLM_CLAIMED`. The merge now recognises a field whose structured provenance
+  says `VERIFIED` and leaves it out of `claimed_inputs`. The precedence is
+  scoped to `consolidated_revenue` only — it is an exception for a source the
+  filing states authoritatively, not a general rule — and it applies only with a
+  complete, verified provenance: an `UNVERIFIED` concept keeps the claim
+  classification.
+
+## [0.8.8] — 2026-11-10
+
+### Fixed
+
+- **`consolidated_revenue` now comes from the SEC filing, not from a regex over
+  the analyst's prose.** The 2026-11-10 16:15 BRK-B report stated Q3 2026
+  revenue of 105,647 million and showed
+  `consolidated_revenue: NOT_COMPUTABLE — "no consolidated revenue was filed or
+  reported"`. Both cannot be true. `RunInputs.revenue_consolidated` was
+  populated only by `math/extraction.py`, which reads a labelled sentence out of
+  the fundamentals report, so a figure the filing states authoritatively was
+  made conditional on how a model worded it. New
+  `math/sec_revenue_inputs.py` reads the `companyfacts` payload the SEC provider
+  already returns, selects the consolidated concept through the same
+  `concept_resolution` ordering the statement writer uses, and carries the
+  provenance the registry records: concept, CIK, accession, period, unit, scale
+  and validation status. The data-quality node publishes those inputs into the
+  run's state, which is the link that was missing.
+  A component (`RevenueFromContractWithCustomerExcludingAssessedTax`) still
+  cannot fill the consolidated metric, and an unavailable source leaves it
+  `NOT_COMPUTABLE` rather than inventing a value.
+
 ## [0.8.7] — 2026-11-10
 
 ### Fixed

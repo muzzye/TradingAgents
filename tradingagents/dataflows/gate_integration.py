@@ -56,6 +56,9 @@ from tradingagents.dataflows.risk_engine import (
     size_with_exposure_cap,
     validate_stop_side,
 )
+from tradingagents.dataflows.sec_claim_reconciliation import (
+    reconcile_revenue_claims,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +419,17 @@ def evaluate_decision(
     if math_reasons:
         data_quality_blocked = True
 
+    # FIX #1.1: a report that states a consolidated revenue the filing
+    # contradicts. The certified value is correct and stays; the disagreement is
+    # recorded as a finding here, where both the registry and the report exist.
+    # The Data Quality node cannot do it: it runs in parallel with the analysts,
+    # so the fundamentals report is still empty when it executes.
+    revenue_findings = reconcile_revenue_claims(metric_registry, reports_to_check)
+    if revenue_findings:
+        data_quality_blocked = True
+        math_reasons = tuple(dict.fromkeys(
+            tuple(math_reasons) + (GateReason.SEC_REVENUE_CLAIM_MISMATCH,)))
+
     # §4: an executable decision must rest on at least one certified metric.
     # Without a registry — or with one that certified nothing — the gate cannot
     # say the plan's numbers hold up, so it must not propose an order. The
@@ -461,6 +475,9 @@ def evaluate_decision(
         gate=decision,
         strategic=strategic,
         session_date=sessions[-1] if sessions else None,
+        # FIX #1.1: the complete findings, so the audit and the run record
+        # carry both figures rather than only the reason code.
+        revenue_claim_findings=list(revenue_findings) or None,
     )
     if freshness is not None:
         record.fundamentals_freshness = freshness

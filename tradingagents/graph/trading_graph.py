@@ -53,10 +53,19 @@ def _merge_extracted(base, extracted):
     if extracted is None:
         return base
     updates = {}
+    # Metrics whose structured value, when fully verified, outranks a figure
+    # read from prose. Only `consolidated_revenue` is listed: the precedence is
+    # a deliberate exception for a source the SEC filing states authoritatively,
+    # not a general rule that would re-trust every structured input.
+    verified_from_source = _verified_source_inputs(base)
     for name in base.__dataclass_fields__:
         if name == "claimed_inputs":
-            merged = tuple(sorted(set(base.claimed_inputs or ())
-                                  | set(extracted.claimed_inputs or ())))
+            claimed = set(base.claimed_inputs or ()) | set(extracted.claimed_inputs or ())
+            # A verified structured value is not a claim, even when a report
+            # happens to state the same metric: the filing is the fact, the
+            # prose is a restatement of it.
+            claimed -= verified_from_source
+            merged = tuple(sorted(claimed))
             if merged != tuple(base.claimed_inputs or ()):
                 updates[name] = merged
             continue
@@ -67,6 +76,27 @@ def _merge_extracted(base, extracted):
         if found is not None:
             updates[name] = found
     return replace(base, **updates) if updates else base
+
+
+
+# The metrics a fully verified source may outrank prose for (FIX #1, problem B).
+_SOURCE_VERIFIED_FIELDS = ("revenue_consolidated",)
+
+
+def _verified_source_inputs(base) -> set[str]:
+    """The fields whose value came from a fully verified structured source.
+
+    A provenance that says ``VERIFIED`` is what makes a figure a fact rather
+    than a restatement. Without it — no provenance, or one that says the concept
+    was a subset — the field stays a claim and prose may still be its only
+    source, which is the honest classification.
+    """
+    verified: set[str] = set()
+    provenance = getattr(base, "revenue_provenance", None) or {}
+    if (isinstance(provenance, dict)
+            and provenance.get("validation_status") == "VERIFIED"):
+        verified.add("revenue_consolidated")
+    return verified & set(_SOURCE_VERIFIED_FIELDS)
 
 
 def _portfolio_sizing_inputs(config: dict, portfolio, ticker: str) -> dict:
@@ -596,6 +626,8 @@ class TradingAgentsGraph:
                 },
                 risk=audit_record.to_dict().get("risk", {}),
                 execution_gate=audit_record.to_dict().get("execution", {}),
+                revenue_claim_findings=(
+                    audit_record.to_dict().get("revenue_claim_findings") or []),
                 audit=audit_record.to_dict(),
             )
             path = rr.write_run(

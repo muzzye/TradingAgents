@@ -72,3 +72,11 @@ class AgentState(MessagesState):
     memory_note: Annotated[str, "What the Memory Log step could not settle or read this run, for the report; empty when all went well"]
     portfolio_context: Annotated[str, "Caller-supplied holdings and cash, rendered at run start; empty when not provided"]
     data_quality_precheck: Annotated[dict, "Deterministic data-quality findings computed before synthesis (freshness, arithmetic); the managers see the notice and the gate reuses the verdicts"]
+
+    # The filing's revenue, published by the Data Quality Check node from the
+    # SEC payload. Declared here because `StateGraph(AgentState)` keeps only the
+    # keys its schema names: an undeclared key returned by a node is dropped
+    # between nodes, so the registry never saw a figure no report mentioned.
+    revenue_consolidated: Annotated[float, "Consolidated revenue the filing states, in base units, as of the period end below"]
+    revenue_prior: Annotated[float, "The same quarter a year earlier, when the filing reports it"]
+    revenue_provenance: Annotated[dict, "Where revenue_consolidated came from: concept, CIK, accession, period, unit, scale, validation status"]
