@@ -638,8 +638,16 @@ def attach_registry_status(final_state: dict, registry: Any) -> None:
     Written into the state so the caller, the CLI and the audit can all say
     *how many metrics were certified* and *whether the order was authorised* —
     two different questions that the earlier code answered with one flag.
+
+    §3 of P4 also attaches the registry itself, so the report renderer builds its
+    tables from the same records the audit sees instead of re-reading the
+    agents' prose. The summary alone was not enough: a report needs each metric's
+    value and formula, not a count of them.
     """
     from tradingagents.dataflows.math.run_registry import status_of
+
+    if registry is not None:
+        final_state["metric_registry"] = registry
 
     if registry is None:
         final_state["metric_registry_status"] = {

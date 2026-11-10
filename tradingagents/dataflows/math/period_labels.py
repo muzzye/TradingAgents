@@ -231,3 +231,120 @@ def growth_for_label(earlier: float | None, later: float | None,
         return None, check
     value = (Decimal(str(later)) / Decimal(str(earlier)) - 1) * 100
     return quantize(value, PERCENT_QUANTUM), check
+
+
+# ===========================================================================
+# Annualising a quarterly figure (§4 of P4)
+# ===========================================================================
+
+
+class AnnualizationVerdict(StrEnum):
+    """Whether a stated annual rate follows from its quarterly figure."""
+
+    CONSISTENT = "CONSISTENT"          # the stated rate is the formula's result
+    FORMULA_MISSING = "FORMULA_MISSING"  # no formula or frequency stated
+    MISMATCH = "MISMATCH"              # a formula was stated and the rate does not follow
+    UNVERIFIED = "UNVERIFIED"          # the quarterly figure itself is unknown
+
+
+@dataclass(frozen=True)
+class AnnualizationCheck:
+    """The result of checking an annualised claim against its quarterly figure."""
+
+    verdict: AnnualizationVerdict
+    quarterly_pct: float | None = None
+    stated_annual_pct: float | None = None
+    computed_annual_pct: Decimal | None = None
+    periods_per_year: int | None = None
+    tolerance_pct: float = 0.05
+    reason: str = ""
+
+    @property
+    def blocks(self) -> bool:
+        """A rate that does not follow from its formula may not be quoted."""
+        return self.verdict in (AnnualizationVerdict.MISMATCH,
+                                AnnualizationVerdict.FORMULA_MISSING)
+
+    def summary(self) -> dict:
+        return {
+            "verdict": str(self.verdict),
+            "quarterly_pct": self.quarterly_pct,
+            "stated_annual_pct": self.stated_annual_pct,
+            "computed_annual_pct": (str(self.computed_annual_pct)
+                                    if self.computed_annual_pct is not None else None),
+            "periods_per_year": self.periods_per_year,
+            "tolerance_pct": self.tolerance_pct,
+            "blocks": self.blocks,
+            "reason": self.reason,
+        }
+
+
+def check_annualization(stated_annual_pct: float | None, *,
+                        quarterly_pct: float | None = None,
+                        periods_per_year: int | None = None,
+                        formula: str | None = None,
+                        tolerance_pct: float = 0.05) -> AnnualizationCheck:
+    """Does a stated annual rate follow from its quarterly figure?
+
+    The audit's regression: a quarterly buyback of 0.78% of market cap is 3.12%
+    annualised at a flat pace, and a report that says "1.2% annualised" without
+    a formula has produced a number nobody can reproduce. Simple scaling
+    (``quarterly x periods_per_year``) is what the stated 3.12% uses, so that is
+    the formula checked; a compounding rate would be a different formula and must
+    say so.
+
+    ``formula`` and ``periods_per_year`` are what make a rate reproducible. With
+    neither, the claim is ``FORMULA_MISSING`` — not wrong, but not checkable, and
+    a rate that cannot be checked is not a certified figure.
+    """
+    from tradingagents.dataflows.math.precision import annualize
+
+    if quarterly_pct is None:
+        return AnnualizationCheck(AnnualizationVerdict.UNVERIFIED,
+                                  stated_annual_pct=stated_annual_pct,
+                                  reason="the quarterly figure is unknown, so the "
+                                         "annual rate cannot be checked")
+
+    if periods_per_year is None and formula is None:
+        return AnnualizationCheck(
+            AnnualizationVerdict.FORMULA_MISSING,
+            quarterly_pct=quarterly_pct, stated_annual_pct=stated_annual_pct,
+            reason=("the annual rate states no formula and no frequency, so it "
+                    "cannot be reproduced from the quarterly figure"),
+        )
+    if periods_per_year is None:
+        return AnnualizationCheck(
+            AnnualizationVerdict.FORMULA_MISSING,
+            quarterly_pct=quarterly_pct, stated_annual_pct=stated_annual_pct,
+            reason=f"the formula '{formula}' does not state its frequency",
+        )
+
+    computed = annualize(quarterly_pct, periods_per_year)
+    if computed is None:
+        return AnnualizationCheck(AnnualizationVerdict.UNVERIFIED,
+                                  quarterly_pct=quarterly_pct,
+                                  stated_annual_pct=stated_annual_pct,
+                                  periods_per_year=periods_per_year,
+                                  reason="the annualisation produced no value")
+
+    if stated_annual_pct is None:
+        return AnnualizationCheck(AnnualizationVerdict.UNVERIFIED,
+                                  quarterly_pct=quarterly_pct,
+                                  computed_annual_pct=computed,
+                                  periods_per_year=periods_per_year,
+                                  reason="no annual rate was stated")
+
+    difference = abs(Decimal(str(stated_annual_pct)) - computed)
+    if difference <= Decimal(str(tolerance_pct)):
+        return AnnualizationCheck(
+            AnnualizationVerdict.CONSISTENT, quarterly_pct, stated_annual_pct,
+            computed, periods_per_year,
+            reason=f"{quarterly_pct}% x {periods_per_year} = {computed}%, which "
+                   "the stated rate reproduces",
+        )
+    return AnnualizationCheck(
+        AnnualizationVerdict.MISMATCH, quarterly_pct, stated_annual_pct,
+        computed, periods_per_year,
+        reason=(f"the stated {stated_annual_pct}% does not follow from "
+                f"{quarterly_pct}% x {periods_per_year} = {computed}%"),
+    )

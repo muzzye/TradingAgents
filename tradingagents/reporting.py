@@ -110,9 +110,16 @@ def write_report_tree(final_state: dict, ticker: str, save_path, settings: dict 
         content = "\n\n".join(f"### {agent}\n{text}" for agent, _filename, text in written)
         sections.append(f"## {heading}\n\n{content}")
 
-    (save_path / "complete_report.md").write_text(
-        _header(ticker, final_state, settings) + "\n\n".join(sections), encoding="utf-8"
-    )
+    # §3 of P4: the certified table is built from the registry's MetricRecords,
+    # not from the agents' prose, and it goes before the sections that discuss
+    # those numbers.
+    from tradingagents.dataflows.certified_report import certified_table_markdown
+
+    body = _header(ticker, final_state, settings) + "\n\n".join(sections)
+    certified = certified_table_markdown(final_state)
+    if certified:
+        body = _header(ticker, final_state, settings) + certified + "\n" + "\n\n".join(sections)
+    (save_path / "complete_report.md").write_text(body, encoding="utf-8")
     if html:
         from tradingagents.report_html import render_report
 

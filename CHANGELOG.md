@@ -19,6 +19,39 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.4] — 2026-11-10
+
+### Added
+
+- **The certified table in every report, built from `MetricRecord`.** The report
+  header now carries a table of every metric the engine produced, with its value,
+  formula, period and status — including the refused and not-computable ones,
+  because a table of successes only hides the gap a reader needs to see. A figure
+  the report stated that the engine did not confirm is listed beside the computed
+  value. The table reads `final_state["metric_registry"]`, which the graph now
+  attaches alongside the summary it already recorded (F2).
+- **`pb_aggregate` is a registered metric,** with formula
+  `market_cap_div_attributable_equity`, and `pb_reconciliation` records whether
+  the aggregate and per-share forms agree. They are two metrics because they can
+  legitimately disagree: a dual-class filer's class-B price and the market cap a
+  report quotes are not always the same snapshot. A disagreement beyond 1% is
+  `REFUSED` with its size recorded, never averaged away — 1.6174x from
+  `1,231.44bn / 761.368bn` is certified; a run where the class-B price implies a
+  different market cap records the 4.04% gap instead of quoting both as "the"
+  P/B (F3).
+- **`check_annualization()`** in `math/period_labels.py`: a quarterly 0.78%
+  buyback is 3.12% annualised at a flat pace, and a stated rate that does not
+  follow from its formula is `MISMATCH`; a rate with no formula or frequency is
+  `FORMULA_MISSING` and cannot be quoted.
+
+### Fixed
+
+- **A model's own EPS could be certified.** `_register_eps_reconciliation`
+  divided the reported EPS by the weighted-average share count and registered the
+  result as `VERIFIED`, ignoring that the EPS itself was a claim. A run whose
+  `claimed_inputs` names `eps_ttm` now records it as `LLM_CLAIMED`, so the
+  arithmetic still verifies but the figure cannot influence a decision.
+
 ## [0.8.3] — 2026-11-10
 
 ### Fixed
