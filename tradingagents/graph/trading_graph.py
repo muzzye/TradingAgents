@@ -564,6 +564,9 @@ class TradingAgentsGraph:
                 filings=list(filings or []),
                 metric_registry=(registry.summary()
                                  if registry is not None else {}),
+                # §Task 5 of P6: what the run read, traceable to the call.
+                tool_calls=rr.tool_calls_from_messages(
+                    final_state.get("messages") or ()),
                 agents={
                     "market": final_state.get("market_report"),
                     "sentiment": final_state.get("sentiment_report"),

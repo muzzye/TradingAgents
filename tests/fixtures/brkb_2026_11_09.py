@@ -57,6 +57,15 @@ SHARES_CLASS_B = 1_400_000_000.0
 CLASS_A_TO_B_RATIO = float(BRK_A_TO_B_RATIO)
 CLASS_B_EQUIVALENT_SHARES = SHARES_CLASS_B + SHARES_CLASS_A * CLASS_A_TO_B_RATIO
 
+# --- EPS, both of its halves -----------------------------------------------
+# The report states a trailing EPS and a weighted-average share count. The
+# count is *weighted average*, not the period-end figure: using the end-of-
+# quarter count instead is a different denominator and produces a different
+# EPS, which is why the two are named separately in the snapshot.
+EPS_TTM = 39.76                    # the figure the report states
+WEIGHTED_AVERAGE_SHARES = 1_437_000_000.0   # the denominator that reconciles it
+NET_INCOME_TTM = EPS_TTM * WEIGHTED_AVERAGE_SHARES   # 57,127,920,000 USD
+
 # --- Market snapshot --------------------------------------------------------
 
 PRICE = 576.74
@@ -65,6 +74,12 @@ SMA50 = 545.10
 PERIOD_HIGH = 812.35
 ATR = 9.524
 PREVIOUS_CLOSE = 573.50
+# The session's settled close, distinct from the intraday price above. Both are
+# real: 576.74 is where the stock traded at 12:37 New York, 575.25 is where it
+# closed. The EOD change is computed from the second, and the audit's +0.76%
+# follows from it — (575.25 / 570.89 - 1) * 100.
+EOD_CLOSE = 575.25
+EOD_PREVIOUS_CLOSE = 570.89
 
 # The instant the snapshot was taken: midday in New York, so the daily candle
 # is still forming and its Close is not a close.
@@ -77,6 +92,73 @@ ACCOUNT_EQUITY = 100_000.0
 RISK_PER_TRADE_PCT = 0.01
 MAX_SYMBOL_EXPOSURE = 0.05
 RISK_BUDGET = ACCOUNT_EQUITY * RISK_PER_TRADE_PCT      # 1,000 USD
+
+# --- Risk policy, stated rather than implied --------------------------------
+# The gate reads these; a test that leaves them out runs a different policy
+# from the one the audit examined. SLIPPAGE_PCT and COMMISSION_FIXED are
+# costs, and they change the authorised quantity, which is why they belong in
+# the frozen snapshot rather than in a test's local constant.
+
+SLIPPAGE_PCT = 0.0005          # 5 basis points, the engine's default
+COMMISSION_FIXED = 5.0         # currency units per order
+COMMISSION_PER_SHARE = 0.0
+GAP_ATR = 0.0                  # no additional gap stress beyond the stop
+MIN_STOP_ATR = 0.25            # the tightest stop policy tolerates
+
+RISK_POLICY = {
+    "equity": ACCOUNT_EQUITY,
+    "cash": CASH,
+    "risk_budget": RISK_BUDGET,
+    "risk_per_trade_pct": RISK_PER_TRADE_PCT,
+    "max_symbol_exposure": MAX_SYMBOL_EXPOSURE,
+    "slippage_pct": SLIPPAGE_PCT,
+    "commission_fixed": COMMISSION_FIXED,
+    "commission_per_share": COMMISSION_PER_SHARE,
+    "gap_atr": GAP_ATR,
+    "min_stop_atr": MIN_STOP_ATR,
+}
+
+# --- News, with the timestamps that make a claim checkable -----------------
+# Two articles about the same session. The first was written mid-session and
+# describes an intraday move; the second is a next-morning summary of the
+# close. Only the second may be compared to the certified close-to-close
+# change, and the first must not be deleted for disagreeing with it.
+
+NEWS_ARTICLES = (
+    {
+        "provider": "yahoo",
+        "url": "https://example.invalid/brk-midday-drop",
+        "published_at": "2026-11-09T17:00:00Z",       # 12:00 New York, session open
+        "updated_at": "2026-11-09T17:30:00Z",
+        "title": "Berkshire slips in midday trading",
+        "stated_pct": -1.01,
+        "comparison": "intraday",
+        "window_start": "2026-11-09T14:30:00Z",
+        "window_end": "2026-11-09T17:00:00Z",
+        "session_date": "2026-11-09",
+    },
+    {
+        "provider": "reuters",
+        "url": "https://example.invalid/brk-close-summary",
+        "published_at": "2026-11-10T13:00:00Z",       # next morning, after the close
+        "updated_at": None,
+        "title": "Berkshire closes higher",
+        "stated_pct": 0.76,
+        "comparison": "close_to_close",
+        "window_start": None,
+        "window_end": None,
+        "session_date": "2026-11-09",
+    },
+)
+
+# The certified close-to-close change the second article is measured against:
+# (575.25 / 570.89 - 1) * 100 = +0.7637%.
+EXPECTED_EOD_CHANGE_PCT = 0.7637
+
+# The two figures the model states that the engine disproves. Kept named so a
+# negative test can assert they never become certified facts.
+LLM_CLAIMED_PB = 1.73
+LLM_CLAIMED_PB_RATIO_ERROR = 0.00116
 
 # --- Expected values, computed by hand, independently of the code -----------
 
@@ -111,6 +193,30 @@ TRADER_PLAN = (
     f"Entry {EXPECTED['entry']:.2f}, stop {EXPECTED['stop']:.2f}, "
     f"ATR {ATR:.3f}. Position sized against the risk budget."
 )
+
+# --- Controlled LLM answers ------------------------------------------------
+# These are not real model outputs and no test asserts they are good analysis.
+# They exist so a run can complete without a provider: the *figures* a report
+# states are what the engine checks, and a fixed narrative makes the
+# reproducibility tests compare computations rather than prose.
+
+LLM_ANSWERS = {
+    "market_report": (
+        "BRK-B traded at 576.74 intraday on 2026-11-09. "
+        "The trailing P/B of 1.73x looks rich against book value."
+    ),
+    "fundamentals_report": (
+        "Q3 2026 consolidated revenue came to 105,647 million USD. "
+        "Book value per class-B share is 359.55 USD."
+    ),
+    "news_report": (
+        "An article reported a -1.01% move during the session."
+    ),
+    "research_manager": "**Recommendation**: Overweight on the fundamentals.",
+    "trader": TRADER_PLAN,
+    "portfolio_manager": "**Rating**: Overweight\nBuy on weakness.",
+}
+
 
 
 @dataclass(frozen=True)
