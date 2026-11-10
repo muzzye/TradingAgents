@@ -24,6 +24,8 @@ import sys
 import time
 from datetime import UTC, datetime
 
+import pytest
+
 from tradingagents.build_info import LOADED_AT, build_info, commit_sha
 from webapp.__main__ import startup_diagnostics
 
@@ -97,27 +99,36 @@ class TestR1ServiceStartedAt:
 
 
 class TestR2AgentRegistry:
-    """`set_run_registry` is called by the tests only, so the tool is inert."""
+    """R2 — the agents can read the registry their run is certified against.
 
-    def test_the_graph_never_attaches_a_registry(self):
-        """No production module calls the setter: the tool can only answer UNSUPPORTED."""
+    The audit found `set_run_registry` had no production call site: every
+    `get_certified_metric` answered UNSUPPORTED while the analyst was working,
+    and the module global it read leaked one analysis's metrics into the next.
+
+    R2 is now fixed (phase 7): the binding is a `ContextVar`, the graph holds it
+    across the whole run, and the tools record into it. These tests pin the
+    fixed behaviour and would fail if any half of it regressed.
+    """
+
+    def test_the_graph_binds_a_registry_for_the_run(self):
+        """A production call site exists, and it is in the graph's run path."""
         result = subprocess.run(
-            ["grep", "-rn", "set_run_registry", "tradingagents/", "cli/", "webapp/",
+            ["grep", "-rn", "set_run_registry", "tradingagents/graph/",
              "--include=*.py"],
             capture_output=True, text=True, check=False,
         )
         call_sites = [
             line for line in result.stdout.splitlines()
             if line.strip() and "__pycache__" not in line
-            and "def set_run_registry" not in line
+            and "import" not in line
         ]
-        assert call_sites == [], (
-            "set_run_registry now has a production call site: R2 has been fixed "
-            "and docs/audits/P1_RUNTIME_VERIFICATION.md must be updated"
+        assert call_sites, (
+            "the graph never binds a registry: R2 has regressed and the agents "
+            "can no longer read certified metrics"
         )
 
-    def test_the_tool_answers_unsupported_without_a_registry(self):
-        """The behaviour R2 produces: a certified metric is unreadable to the agent."""
+    def test_the_agent_reads_a_certified_metric_inside_a_run(self):
+        """The behaviour R2 made impossible: a certified metric is readable."""
         from tradingagents.agents import math_tools
         from tradingagents.dataflows.math.run_registry import (
             RunInputs,
@@ -126,29 +137,26 @@ class TestR2AgentRegistry:
 
         registry = build_run_registry(
             RunInputs(price=576.74, book_value_per_share=359.5599), run_id="r1")
-        assert registry.get("price_to_book").is_usable is True, (
-            "precondition: the gate's own registry certifies a P/B"
-        )
+        assert registry.get("price_to_book").is_usable is True
 
-        # Reset first: the global is process-wide (R2), so a registry another
-        # test attached would otherwise leak in — which is the defect itself.
-        math_tools.set_run_registry(None)
-        try:
+        with math_tools.certified_registry(registry):
             payload = json.loads(math_tools.get_certified_metric.invoke(
                 {"metric_name": "price_to_book", "ticker": "BRK-B"}))
-        finally:
-            math_tools.set_run_registry(None)
+        assert payload["value"] is not None
+        assert payload["calculation_status"] == "VERIFIED"
+
+    def test_outside_a_run_the_tool_is_honest_again(self):
+        """No binding means no certified figure — not a remembered one."""
+        from tradingagents.agents import math_tools
+
+        payload = json.loads(math_tools.get_certified_metric.invoke(
+            {"metric_name": "price_to_book", "ticker": "BRK-B"}))
         assert payload["value"] is None
         assert payload["calculation_status"] == "UNSUPPORTED"
         assert payload["blocks_decision"] is True
 
-    def test_a_registry_attached_for_one_run_is_visible_to_the_next(self):
-        """R2's second harm: the global is shared, so runs are not isolated.
-
-        A registry attached while evaluating one analysis stays readable after
-        that analysis ends. Two analyses in one process therefore share it,
-        which is what `run_registry`'s module docstring says must never happen.
-        """
+    def test_two_runs_do_not_share_a_registry(self):
+        """R2's second harm, now prevented: the binding is per context."""
         from tradingagents.agents import math_tools
         from tradingagents.dataflows.math.run_registry import (
             RunInputs,
@@ -157,17 +165,41 @@ class TestR2AgentRegistry:
 
         first = build_run_registry(
             RunInputs(price=576.74, book_value_per_share=359.5599), run_id="run-a")
-        math_tools.set_run_registry(first)
-        try:
-            leaked = json.loads(math_tools.get_certified_metric.invoke(
-                {"metric_name": "price_to_book", "ticker": "BRK-B"}))
-        finally:
-            math_tools.set_run_registry(None)
+        second = build_run_registry(
+            RunInputs(price=100.0, book_value_per_share=50.0), run_id="run-b")
 
-        assert leaked["value"] is not None, (
-            "the attached registry was expected to leak into the next read — "
-            "if this fails, run isolation has been fixed and R2 is resolved"
-        )
+        with math_tools.certified_registry(first):
+            inside_first = math_tools._run_registry()
+        with math_tools.certified_registry(second):
+            inside_second = math_tools._run_registry()
+
+        assert inside_first is first
+        assert inside_second is second
+        assert inside_first is not inside_second
+        assert math_tools._run_registry() is None, (
+            "a finished run must not leave its registry readable")
+
+    def test_a_tool_records_what_it_computed(self):
+        """The other half of R2: a computed value is not thrown away."""
+        from tradingagents.agents import math_tools
+        from tradingagents.dataflows.math.registry import MetricRegistry
+
+        registry = MetricRegistry(run_id="write-through")
+        with math_tools.certified_registry(registry):
+            math_tools.calculate_price_to_book.invoke(
+                {"price": 576.74, "book_value_per_share": 359.5599})
+        assert registry.get("price_to_book") is not None, (
+            "the tool computed a P/B and the registry never saw it")
+
+    def test_the_binding_is_restored_after_an_exception(self):
+        """A failed run must not leave its registry bound for the next one."""
+        from tradingagents.agents import math_tools
+        from tradingagents.dataflows.math.registry import MetricRegistry
+
+        with (pytest.raises(RuntimeError),
+              math_tools.certified_registry(MetricRegistry(run_id="boom"))):
+            raise RuntimeError("run failed")
+        assert math_tools._run_registry() is None
 
 
 # ---------------------------------------------------------------------------
