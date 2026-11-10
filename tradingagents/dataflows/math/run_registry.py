@@ -47,6 +47,16 @@ class RunInputs:
     """
 
     price: float | None = None
+    # What kind of number `price` is (FIX #2). A moving average is an indicator,
+    # not a quote: the 2026-11-10 report priced BRK-B at 1.49x by dividing the
+    # SMA50 (522.97) by book value, and the engine certified it because nothing
+    # recorded that the numerator was not a market price.
+    #
+    # `kind` is one of MARKET_PRICE_KINDS below; anything else — including a
+    # missing provenance — is treated as unqualified and cannot certify a
+    # multiple. A caller that supplies no provenance is assumed to have supplied
+    # a real quote, which is what every pre-existing caller did.
+    price_provenance: dict | None = None
     previous_close: float | None = None
     sma50: float | None = None
     sma200: float | None = None
@@ -67,6 +77,11 @@ class RunInputs:
     # quarter five months earlier is not wrong arithmetic — it is two different
     # moments divided by each other, and the report must be able to say which.
     equity_period_end: str | None = None
+    # Where the equity and the book value came from (FIX #2). A filing that
+    # states attributable equity, both share counts and a conversion ratio
+    # produces a VERIFIED provenance; anything else leaves the book value
+    # unverified, and a model restating the number does not change that.
+    equity_provenance: dict | None = None
     # A market capitalisation the report itself states, when it does (§2 of P4).
     # Kept separate from ``price * shares`` on purpose: the two are the same
     # number only when the report used the same share count and the same
@@ -92,6 +107,89 @@ class RunInputs:
     # looking exactly like reconciled ones — the original F2 defect, where a
     # P/B the model invented was indistinguishable from a computed one.
     claimed_inputs: tuple[str, ...] = ()
+
+
+# The kinds of number that may stand as the share price in a valuation (FIX #2).
+#
+# A moving average, an ATR or any other indicator describes the price series; it
+# is not a quote for one instant. Feeding one to a P/B produces a number that
+# looks like a multiple and is not one, which is exactly what the 2026-11-10
+# report did with the SMA50.
+MARKET_PRICE_KINDS = frozenset({"market_price", "eod_close", "intraday"})
+
+# Provenance statuses that make a price unusable as a valuation numerator.
+_NON_PRICE_KINDS = frozenset({"indicator", "not_a_price", "unqualified"})
+
+
+def price_is_qualified(inputs: RunInputs) -> bool:
+    """Whether ``inputs.price`` is a market price rather than an indicator.
+
+    Three cases, and the middle one is why this is a whitelist rather than a
+    check on the value:
+
+    - no provenance at all → assumed a quote. Every caller before FIX #2 passed
+      a bare price and meant it, and rejecting them would break working runs
+      without making anything safer.
+    - a provenance whose ``kind`` is a market price → qualified, provided it is
+      not marked unverified.
+    - a provenance naming an indicator, or marked ``NOT_A_PRICE`` → refused.
+    """
+    if inputs.price is None:
+        return False
+    provenance = inputs.price_provenance
+    if not isinstance(provenance, dict):
+        # Finding 2 of the final review: a price with no provenance is a number
+        # whose kind nobody stated. Accepting it is how a moving average gets
+        # certified as a spot price. The state path always carries one, and the
+        # tests that construct RunInputs directly now say what they mean.
+        return False
+
+    kind = str(provenance.get("kind") or "").lower()
+    status = str(provenance.get("validation_status") or "").upper()
+    if kind not in MARKET_PRICE_KINDS:
+        return False
+    return status == "VERIFIED"
+
+
+# The accounting bundle's own validation state (FIX #2, finding 2).
+#
+# The extractor judges whether a filing agrees with itself. Its verdict must
+# travel to the registry with the operands, because the registry can recompute a
+# book value from numbers that are individually present and jointly
+# incompatible: an equity from Q3 divided by share counts from Q2 produces a
+# perfectly formed figure that means nothing.
+ACCOUNTING_VERIFIED = "VERIFIED"
+ACCOUNTING_UNVERIFIED = "UNVERIFIED"
+
+
+def accounting_may_certify(inputs: RunInputs) -> bool:
+    """Whether the accounting operands may certify a book value or a P/B.
+
+    A whitelist, not a blacklist. Only an *explicit* ``VERIFIED`` provenance
+    qualifies. Absence, an empty dict, ``UNKNOWN`` and ``UNVERIFIED`` all
+    refuse — an earlier version returned True for an absent one, which let a
+    verified price multiplied by an unverified book value produce a certified
+    P/B. Absence of evidence is not evidence.
+
+    A non-SEC source is not special-cased: whatever produces the accounting
+    facts must state the same ``VERIFIED`` status for them to be usable, so a
+    new vendor is supported by giving it that provenance rather than by adding
+    a bypass here.
+    """
+    provenance = inputs.equity_provenance
+    if not isinstance(provenance, dict) or not provenance:
+        return False
+    status = str(provenance.get("validation_status") or "").upper()
+    return status == ACCOUNTING_VERIFIED
+
+
+def accounting_rejection(inputs: RunInputs) -> str:
+    """Why the accounting bundle refused, for the record's reason field."""
+    provenance = inputs.equity_provenance or {}
+    if not isinstance(provenance, dict):
+        return ""
+    return str(provenance.get("rejection_reason")
+               or "the accounting bundle was not verified")
 
 
 def _register_if_computable(registry: MetricRegistry, name: str,
@@ -122,8 +220,17 @@ def _register_if_computable(registry: MetricRegistry, name: str,
 
 
 def _source_of(inputs: RunInputs, *names: str) -> SourceStatus:
-    """VERIFIED only when none of the inputs was the model's own claim."""
+    """VERIFIED only when none of the inputs was the model's own claim.
+
+    A refusal from the accounting extractor also lands here: a bundle it judged
+    unusable is not a verified source, whatever its operands look like.
+    """
     if set(inputs.claimed_inputs).intersection(names):
+        return SourceStatus.LLM_CLAIMED
+    if set(names).intersection(("equity", "book_value_per_share",
+                                "shares_class_a", "shares_class_b",
+                                "class_a_to_b_ratio")) \
+            and not accounting_may_certify(inputs):
         return SourceStatus.LLM_CLAIMED
     return SourceStatus.VERIFIED
 
@@ -296,6 +403,78 @@ def _register_dual_class_valuation(registry: MetricRegistry,
     )
     from tradingagents.dataflows.valuation import EquityInputs, reconcile_valuation
 
+    # FIX #2 (finding 2): the accounting bundle's verdict travels with its
+    # operands. An extractor that rejected the filing — incompatible periods, a
+    # non-attributable equity concept, a missing ratio — must not have its
+    # numbers recomputed into a certified book value. The operands being
+    # present is not the same as their being usable.
+    # Whether any accounting operand was offered at all. A run with none is a
+    # gap, not a contradiction — it must stay NOT_COMPUTABLE, otherwise every
+    # analysis without a valuation becomes a blocking decision. Once an operand
+    # is present, the provenance has to justify it: absence of evidence is not
+    # evidence, so a missing provenance refuses exactly like an explicit one.
+    has_accounting_operands = any(
+        operand is not None for operand in (
+            inputs.equity, inputs.book_value_per_share,
+            inputs.shares_class_a, inputs.shares_class_b,
+            inputs.class_a_to_b_ratio,
+        ))
+    if has_accounting_operands and not accounting_may_certify(inputs):
+        reason = accounting_rejection(inputs)
+        registry.register(metric(
+            "book_value_per_share_B", None, unit="base_per_share",
+            formula_id="equity_div_class_b_equivalent_shares",
+            operands={"equity": inputs.equity,
+                      "shares_a": inputs.shares_class_a,
+                      "shares_b": inputs.shares_class_b,
+                      "ratio": inputs.class_a_to_b_ratio,
+                      "equity_provenance": inputs.equity_provenance},
+            calculation_status=CalculationStatus.REFUSED,
+            reason=(f"the accounting inputs were refused: {reason}"
+                    if reason else "the accounting inputs were refused"),
+        ))
+        registry.register(metric(
+            "price_to_book", None, unit="multiple", formula_id="price_div_bvps",
+            operands={"price": inputs.price,
+                      "equity_provenance": inputs.equity_provenance},
+            calculation_status=CalculationStatus.REFUSED,
+            reason=(f"the book value rests on refused accounting inputs: {reason}"
+                    if reason else
+                    "the book value rests on refused accounting inputs"),
+        ))
+        registry.register(metric(
+            "pb_aggregate", None, unit="multiple",
+            formula_id="market_cap_div_attributable_equity",
+            operands={"equity": inputs.equity,
+                      "equity_provenance": inputs.equity_provenance},
+            calculation_status=CalculationStatus.REFUSED,
+            reason="the attributable equity is not verified",
+        ))
+        return
+
+    # FIX #2: a moving average is not a share price. Refuse the numerator here,
+    # before any arithmetic, so no multiple is produced from one — the
+    # 2026-11-10 report priced BRK-B at 1.49x from the SMA50.
+    if not price_is_qualified(inputs):
+        registry.register(metric(
+            "price_to_book", None, unit="multiple", formula_id="price_div_bvps",
+            operands={"price": inputs.price,
+                      "price_provenance": inputs.price_provenance,
+                      "bvps": inputs.book_value_per_share},
+            calculation_status=CalculationStatus.REFUSED,
+            reason=("the numerator is not a market price: an indicator or an "
+                    "unqualified figure cannot price a valuation multiple"),
+        ))
+        registry.register(metric(
+            "pb_aggregate", None, unit="multiple",
+            formula_id="market_cap_div_attributable_equity",
+            operands={"price": inputs.price,
+                      "price_provenance": inputs.price_provenance},
+            calculation_status=CalculationStatus.REFUSED,
+            reason="the market capitalisation would rest on a non-price figure",
+        ))
+        return
+
     b_equivalent = None
     if inputs.shares_class_b is not None and inputs.shares_class_a is not None \
             and inputs.class_a_to_b_ratio is not None:
@@ -387,6 +566,10 @@ def _register_dual_class_valuation(registry: MetricRegistry,
         source_status=_source_of(inputs, "price", "book_value_per_share",
                                  "equity", "shares_class_a",
                                  "shares_class_b", "class_a_to_b_ratio"),
+        # The multiple is as of the book value's period: the price is an
+        # instant and the equity is a quarter, and the quarter is what dates
+        # the figure.
+        period_end=inputs.equity_period_end,
     )
 
     _register_pb_aggregate(registry, inputs, b_equivalent,
@@ -537,6 +720,19 @@ def _register_eps_reconciliation(registry: MetricRegistry,
     )
 
 
+def _price_provenance_from(snapshot: dict) -> dict | None:
+    """The provenance for the price a snapshot carries, when it says anything.
+
+    Returns ``None`` when the snapshot holds no price: an absent price needs no
+    provenance, and ``price_is_qualified`` already refuses it.
+    """
+    from tradingagents.dataflows.math.price_source import price_from_snapshot
+
+    if snapshot.get("close") is None and snapshot.get("price") is None:
+        return None
+    return price_from_snapshot(snapshot)
+
+
 def registry_inputs_from_state(state: dict) -> RunInputs:
     """Read what a finished run can supply, from its own state.
 
@@ -566,6 +762,10 @@ def registry_inputs_from_state(state: dict) -> RunInputs:
 
     return RunInputs(
         price=_num(snapshot.get("close"), snapshot.get("price")),
+        # FIX #2: what kind of number that is. A snapshot built by
+        # `price_source.qualified_price` states it; a bare close lacking any
+        # validation_status is not qualified.
+        price_provenance=_price_provenance_from(snapshot),
         previous_close=_num(snapshot.get("previous_close")),
         sma50=_num(snapshot.get("sma50")),
         sma200=_num(snapshot.get("sma200")),
@@ -589,6 +789,10 @@ def registry_inputs_from_state(state: dict) -> RunInputs:
         market_cap_reported=_num(state.get("market_cap_reported")),
         equity_period_end=(state.get("equity_period_end")
                            or snapshot.get("equity_period_end") or None),
+        equity_provenance=(
+            state.get("equity_provenance")
+            if isinstance(state.get("equity_provenance"), dict) else None
+        ),
         shares_class_a=_num(state.get("shares_class_a")),
         shares_class_b=_num(state.get("shares_class_b")),
         class_a_to_b_ratio=_num(state.get("class_a_to_b_ratio")),

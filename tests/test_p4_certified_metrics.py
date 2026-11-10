@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.fixtures import verified_accounting, verified_price
 from tradingagents.dataflows.certified_report import (
     certified_table_markdown,
     render_metric_table,
@@ -52,6 +53,8 @@ def _brkb_inputs(**overrides) -> RunInputs:
         "shares_class_b": SHARES_B, "class_a_to_b_ratio": A_TO_B,
         "price_class": "B",
     }
+    base.setdefault("price_provenance", verified_price(PRICE_IMPLIED))
+    base.setdefault("equity_provenance", verified_accounting())
     base.update(overrides)
     return RunInputs(**base)
 
@@ -230,7 +233,8 @@ class TestPipelinePropagation:
         graph = _graph(tmp_path)
         state = _state("P/B of 1.6040x.")
         state["verified_market_snapshot"] = {"close": 576.74, "sma200": 502.85,
-                                             "previous_close": 570.89}
+                                             "previous_close": 570.89,
+                                             "price_provenance": {"kind": "intraday", "value": 576.74, "currency": "USD", "share_class": "B", "timestamp": "2026-11-09T17:37:00Z", "session_date": "2026-11-09", "source": "yfinance", "bar_finality": "INTRADAY_PARTIAL", "validation_status": "VERIFIED"}}
         graph.record_decision("BRK-B", "2026-11-09", state)
 
         # The Portfolio Manager is the last node; its state is what this is.
@@ -257,7 +261,8 @@ class TestPipelinePropagation:
         graph = _graph(tmp_path)
         state = _state("P/B of 1.6040x.")
         state["verified_market_snapshot"] = {"close": 576.74, "sma200": 502.85,
-                                             "previous_close": 570.89}
+                                             "previous_close": 570.89,
+                                             "price_provenance": {"kind": "intraday", "value": 576.74, "currency": "USD", "share_class": "B", "timestamp": "2026-11-09T17:37:00Z", "session_date": "2026-11-09", "source": "yfinance", "bar_finality": "INTRADAY_PARTIAL", "validation_status": "VERIFIED"}}
         graph.record_decision("BRK-B", "2026-11-09", state)
 
         report = write_report_tree(state, "BRK-B", tmp_path / "report",

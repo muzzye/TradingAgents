@@ -239,8 +239,13 @@ _CLAIM_PATTERNS: tuple[tuple[str, re.Pattern[str], str, int], ...] = (
     ("distance_from_sma",
      re.compile(r"([-+]?\d+(?:\.\d+)?)\s*%\s+(?:above|below)\s+(?:the\s+)?(?:SMA|EMA)\s*\d*",
                 re.IGNORECASE), "percent", 1),
+    # The multiple may use either separator: `1.49x` in English reports,
+    # `1,49x` in Italian ones. The comma is a decimal here, not a thousands
+    # group — a multiple of 1,490 would be absurd and the parser treats a
+    # three-digit tail separately.
     ("price_to_book",
-     re.compile(r"P/?B[^.\d]{0,20}(\d+(?:\.\d+)?)\s*x?", re.IGNORECASE), "multiple", 1),
+     re.compile(r"P/?B[^.\d,]{0,20}(\d+(?:[.,]\d+)?)\s*x?", re.IGNORECASE),
+     "multiple", 1),
     ("stop_atr",
      re.compile(r"(\d+(?:\.\d+)?)\s*(?:x\s*)?ATR[s]?\b", re.IGNORECASE), "multiple", 1),
     ("risk_reward",
@@ -265,6 +270,26 @@ _CLAIM_PATTERNS: tuple[tuple[str, re.Pattern[str], str, int], ...] = (
 )
 
 
+
+def _decimal_claim(raw: str | None) -> Decimal | None:
+    """A captured figure, reading either decimal separator.
+
+    ``as_decimal`` strips every comma as a thousands separator, which is right
+    for a revenue and wrong for a multiple: `P/B 1,49x` in an Italian report
+    means one point four nine, and reading it as 149 would turn a correct figure
+    into a mismatch. A comma followed by one or two digits is a decimal; three
+    digits is a thousands group, the rule `math/precision` documents.
+    """
+    if not raw:
+        return as_decimal(raw)
+    text = raw.strip()
+    if "," in text and "." not in text:
+        head, _, tail = text.rpartition(",")
+        if len(tail) in (1, 2):
+            text = f"{head}.{tail}"
+    return as_decimal(text)
+
+
 def extract_claims(text: str | None, agent: str = "unknown") -> list[NumericClaim]:
     """Locate labelled numeric claims in an agent's prose.
 
@@ -285,7 +310,7 @@ def extract_claims(text: str | None, agent: str = "unknown") -> list[NumericClai
                 raw = next((g for g in match.groups() if g is not None), None)
                 value = as_decimal(raw)
             else:
-                value = as_decimal(match.group(value_group))
+                value = _decimal_claim(match.group(value_group))
             if value is None:
                 continue
             key = (label, str(value))

@@ -19,6 +19,120 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.19] — 2026-11-10
+
+### Fixed
+
+- **Absence of accounting provenance is no longer treated as verified.**
+  `accounting_may_certify()` returned `True` whenever `equity_provenance` was
+  absent, so a price with a `VERIFIED` provenance multiplied by a bare
+  `book_value_per_share` certified a P/B of 1.6342 — a book value nobody had
+  vouched for. The check is now a whitelist: only an explicit `VERIFIED`
+  status qualifies, while an absent, empty, `UNKNOWN` or `UNVERIFIED`
+  provenance refuses the book value, the per-share P/B and the aggregate form,
+  recording the rejection reason. A non-SEC source is not special-cased; it
+  becomes usable by stating the same status, never through a bypass here.
+- A run offering no accounting operand at all keeps producing
+  `NOT_COMPUTABLE` rather than a refusal: a gap is reported, a contradiction
+  blocks, and the two must stay distinguishable.
+
+### Changed
+
+- The test fixtures that build `RunInputs` or a graph state directly now state
+  the accounting provenance of their equity and share counts, through a shared
+  `verified_accounting()` helper. The stricter rule is not weakened for them —
+  they declare what production declares.
+
+## [0.8.18] — 2026-11-10
+
+### Fixed
+
+- **A refused accounting bundle can no longer certify a book value.** The
+  extractor judges whether a filing agrees with itself, but its verdict never
+  reached the registry: the Data Quality node published equity, share counts
+  and the ratio regardless, `_register_dual_class_valuation` recomputed the book
+  value from them, and `_source_of` never consulted the bundle's status. A run
+  with equity from Q3 and share counts from Q2 therefore produced a `VERIFIED`
+  P/B of 1.6811 from numbers the extractor had rejected. The verdict now travels
+  with the operands: the node keeps `validation_status` and
+  `rejection_reason` in `equity_provenance`, and the registry refuses the book
+  value, the P/B and the aggregate form with the reason recorded.
+- **A price with no provenance no longer prices a multiple.** The lenient branch
+  accepted a bare `RunInputs(price=...)` as a quote, which is how the SMA50 was
+  certified as a spot price. The state path always carries provenance; tests
+  that construct `RunInputs` directly now say what their price is, through a
+  shared `verified_price()` fixture, rather than relying on production being
+  permissive.
+
+## [0.8.17] — 2026-11-10
+
+### Fixed
+
+- **The production graph now gets the SEC accounting facts.** `setup.py` builds
+  the Data Quality Check node as `create_data_quality_check()` with no
+  providers, and the accounting block skipped itself when none was given — so a
+  real run never saw an equity figure and the P/B stayed `NOT_COMPUTABLE`. The
+  revenue and accounting paths now share one SEC fetcher
+  (`_sec_companyfacts`), so both use the same cached, point-in-time call.
+- **A book value is certified only when the filing agrees with itself.** The
+  extraction now excludes facts filed after the analysis date, reads only
+  currency-unit equity, refuses the noncontrolling-interest concept (a different
+  measure from attributable equity), requires the share counts to end on the
+  equity's period, and rejects a missing, zero or negative A/B ratio. Each
+  refusal carries the reason.
+- **A filing's BVPS is not a claim because a report repeats it.**
+  `_merge_extracted` now exempts `book_value_per_share` from `claimed_inputs`
+  when its provenance is `VERIFIED` and the value exists — the same scoped
+  exception revenue already had, and only for that field. A BVPS with no
+  verified provenance stays a claim.
+
+## [0.8.16] — 2026-11-10
+
+### Fixed
+
+- **The production path now supplies a qualified price and the accounting
+  denominator.** Declaring `verified_market_snapshot` on `AgentState` was not
+  enough: nothing populated it, so in a real run the P/B was still
+  `NOT_COMPUTABLE` while the report quoted a multiple. The Data Quality Check
+  node now reads the latest verified OHLCV row and the SEC filing, publishes a
+  price with its provenance (symbol, class, value, currency, timestamp, session
+  date, source, bar finality, kind, validation status) and the accounting facts
+  (attributable equity, both share counts, the conversion ratio, the period
+  end and the derived book value per share). New
+  `dataflows/fundamentals/sec_accounting.py` does the filing side.
+- **An intraday price without a timestamp is not verified.** A print with no
+  observation time cannot be distinguished from a stale quote, so
+  `qualified_price()` marks it `UNVERIFIED` and the registry refuses the
+  multiple.
+- **`P/B 1,49x` parses as 1.49.** The claims validator stripped every comma as
+  a thousands separator, so an Italian decimal multiple read as 149 — a correct
+  figure became a mismatch. A comma followed by one or two digits is now a
+  decimal, the rule `math/precision` already documents for other figures.
+- **`price_to_book` records the book value's period,** so the certified table
+  shows when the figure is as of rather than a dash.
+
+## [0.8.15] — 2026-11-10
+
+### Fixed
+
+- **A moving average can no longer price a valuation multiple.** The 2026-11-10
+  BRK-B report stated a P/B of 1.49x, which is the 50-day moving average
+  (522.97) divided by book value (352). The share traded near 577 and closed at
+  575.25, so the multiple was 1.63–1.64. `RunInputs` now carries a
+  `price_provenance`, and `_register_dual_class_valuation` refuses the numerator
+  when that provenance names an indicator or is marked `NOT_A_PRICE`: the
+  multiple is recorded as `REFUSED` with the reason, never certified. A caller
+  that supplies no provenance is still treated as having supplied a quote, which
+  is what every earlier caller meant.
+- **The verified market snapshot survives the graph.** `verified_market_snapshot`
+  was not declared on `AgentState`, and `StateGraph(AgentState)` keeps only the
+  keys its schema names — so the snapshot a market analyst read vanished between
+  nodes, `registry_inputs_from_state` found no price, and every P/B came out
+  `NOT_COMPUTABLE` while the report still quoted a multiple. It is now declared,
+  and `price_source.qualified_price()` gives the snapshot a provenance whose
+  kind is derived from the bar's finality (`eod_close`, `intraday`,
+  `unqualified`) rather than asserted by the caller.
+
 ## [0.8.14] — 2026-11-10
 
 ### Fixed

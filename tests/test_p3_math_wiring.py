@@ -16,6 +16,7 @@ import json
 
 import pytest
 
+from tests.fixtures import verified_accounting, verified_price
 from tradingagents.dataflows.math.extraction import extract_run_inputs, from_report
 from tradingagents.dataflows.math.metric_record import (
     CalculationStatus,
@@ -30,7 +31,22 @@ from tradingagents.portfolio import PortfolioContext
 BRKB_CERTIFIED = {
     "company_of_interest": "BRK-B",
     "trade_date": "2026-11-09",
-    "verified_market_snapshot": {"close": 576.74, "sma200": 502.85},
+    "verified_market_snapshot": {"close": 576.74, "sma200": 502.85, "currency": "USD",
+     "price_provenance": {"kind": "intraday", "value": 576.74,
+                          "currency": "USD", "share_class": "B",
+                          "timestamp": "2026-11-09T17:37:00Z",
+                          "session_date": "2026-11-09",
+                          "source": "yfinance",
+                          "bar_finality": "INTRADAY_PARTIAL",
+                          "validation_status": "VERIFIED"}},
+    # The accounting bundle the filing certifies. Without it the equity and the
+    # share counts below are operands nobody vouched for, and the book value
+    # they produce cannot be certified (FIX #2).
+    "equity_provenance": {"validation_status": "VERIFIED",
+                          "concept": "StockholdersEquity",
+                          "period_end": "2026-09-30",
+                          "source": "SEC_EDGAR"},
+    "equity_period_end": "2026-09-30",
     "market_report": "",
     "sentiment_report": "",
     "news_report": "",
@@ -137,7 +153,8 @@ def test_2_a_class_mismatched_book_value_is_refused_not_reported(tmp_path):
         currency="USD",
         # A class-B book value quoted against a class-A price.
         book_value_per_share=0.2397,
-    ), run_id="mismatch")
+            equity_provenance=verified_accounting()
+        ), run_id="mismatch")
 
     record = registry.get("price_to_book")
     assert record is not None
@@ -193,7 +210,8 @@ def test_5_every_certified_metric_carries_its_formula_and_operands():
     registry = build_run_registry(RunInputs(
         price=576.74, book_value_per_share=359.5599,
         eps_ttm=39.76, eps_forward=22.43,
-    ), run_id="formula")
+            equity_provenance=verified_accounting()
+        ), run_id="formula")
 
     certified = [r for r in registry._records.values() if r.value is not None]
     assert certified, "the run had inputs, so something must be computable"
@@ -251,7 +269,9 @@ def test_8_a_model_authored_figure_is_never_a_certified_fact():
         price=576.74,
         book_value_per_share=359.5599,
         claimed_inputs=("book_value_per_share",),
-    ), run_id="claimed")
+        price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ), run_id="claimed")
 
     record = registry.get("price_to_book")
     assert record.calculation_status is CalculationStatus.VERIFIED
@@ -262,7 +282,7 @@ def test_8_a_model_authored_figure_is_never_a_certified_fact():
 @pytest.mark.unit
 def test_8b_claimed_inputs_survive_the_merge_with_state():
     """The provenance must not be lost when the two sources are combined."""
-    base = RunInputs(price=576.74)
+    base = RunInputs(price=576.74, price_provenance=verified_price(576.74))
     extracted = extract_run_inputs({
         "fundamentals_report": "Book value per share 359,5599 USD.",
     })
@@ -421,7 +441,8 @@ def test_16_no_authorization_is_issued_on_an_invalid_metric(tmp_path):
     registry = build_run_registry(RunInputs(
         price=576.74, eps_ttm=39.76, book_value_per_share=359.5599,
         claimed_inputs=("eps_ttm", "book_value_per_share"),
-    ), run_id="bad")
+            equity_provenance=verified_accounting()
+        ), run_id="bad")
 
     record, decision = evaluate_decision(
         "BRK-B", "2026-11-09", state, snapshot_id="s16",

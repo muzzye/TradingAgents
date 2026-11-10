@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from tests.fixtures import verified_price
 from tradingagents.dataflows.claim_harvester import harvest_facts
 
 
@@ -86,7 +87,7 @@ class TestRegistryWiring:
             # A snapshot the engine can certify from, so these tests measure
             # the harvest wiring rather than the authorisation rule (§4: no
             # certified metric means no order).
-            "verified_market_snapshot": {"close": 570.89, "sma200": 497.723},
+            "verified_market_snapshot": {"close": 570.89, "sma200": 497.723, "price_provenance": {"kind": "intraday", "value": 570.89, "currency": "USD", "share_class": "B", "timestamp": "2026-11-07T17:37:00Z", "session_date": "2026-11-07", "source": "yfinance", "bar_finality": "INTRADAY_PARTIAL", "validation_status": "VERIFIED"}},
         }
         state.update(reports)
         return state
@@ -107,7 +108,7 @@ class TestRegistryWiring:
             # §4: a certified metric is required for approval. The subject here
             # is the fact-harvest wiring, so the run is made otherwise sound.
             metric_registry=build_run_registry(
-                RunInputs(price=570.89, sma200=497.723)),
+                RunInputs(price=570.89, sma200=497.723, price_provenance=verified_price(570.89))),
         )
         assert record.fact_registry is not None
         assert not record.fact_registry.blocks_decision
