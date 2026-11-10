@@ -152,7 +152,7 @@ def _span_index(fact: dict, spans: tuple[tuple[int, int], ...]) -> int | None:
 
 
 def _as_of(facts: dict, tags: tuple[str, ...], as_of_date: str, spans: tuple[tuple[int, int], ...],
-           forms: tuple[str, ...] = ()) -> tuple[dict, str]:
+           forms: tuple[str, ...] = (), *, cik: str | None = None) -> tuple[dict, str]:
     """({(period end, span index): value}, unit) for the tags the filer reports, as known then.
 
     A period reported more than once takes its latest filing on or before the
@@ -169,19 +169,37 @@ def _as_of(facts: dict, tags: tuple[str, ...], as_of_date: str, spans: tuple[tup
     consulted — the F1 defect of the data lineage audit.
     """
     values, unit, _ = _as_of_with_provenance(
-        facts, tags, as_of_date, spans, forms)
+        facts, tags, as_of_date, spans, forms, cik=cik)
     return values, unit
 
 
 def _as_of_with_provenance(
     facts: dict, tags: tuple[str, ...], as_of_date: str,
     spans: tuple[tuple[int, int], ...], forms: tuple[str, ...] = (),
+    *, cik: str | None = None,
 ) -> tuple[dict, str, dict]:
     """As ``_as_of``, plus the tag each period's figure came from.
 
     The third element maps ``(period end, span index)`` to a
     ``TagProvenance``, so a caller can ask *what* a figure measures — the
     information ``_as_of`` previously discarded at the vendor boundary.
+
+    Ordering alone was not enough. A filer reporting the consolidated total for
+    the latest quarter and only a component for the prior one produced a row
+    whose two periods measured different things, and the growth computed across
+    them was meaningless (76.08% where the consolidated history says 11.24%).
+
+    The rule is therefore: **one scope per row, decided by the periods where the
+    scopes overlap.** If a consolidated tag and a narrower tag both report the
+    same period, the narrower one is a component of that row and is dropped
+    everywhere — inside the row they cannot be mixed. If they never overlap, the
+    filer renamed its revenue line over the years (Apple: `Revenues` in 2015,
+    `RevenueFromContractWithCustomerExcludingAssessedTax` since 2018) and both
+    are the row's own history, so both are kept.
+
+    The distinction is derived from the filing, not from the tag's spelling:
+    `RevenueFromContractWithCustomerExcludingAssessedTax` is Apple's whole top
+    line and Berkshire's component, and only the payload can say which.
     """
     from tradingagents.dataflows.vendors.concept_resolution import (
         TagProvenance,
@@ -192,11 +210,32 @@ def _as_of_with_provenance(
     values: dict[tuple[str, int], float] = {}
     provenance: dict[tuple[str, int], TagProvenance] = {}
     chosen_unit = "USD"
+    # Which periods each scope reports, known before any value is taken, so the
+    # row's scope can be decided from the overlap rather than from tag order.
+    periods_by_scope: dict[str, set[tuple[str, int]]] = {}
+    for tag in tags:
+        tag_scope = str(scope_of(tag))
+        for unit_values in ((facts.get(tag) or {}).get("units", {})).values():
+            for fact in unit_values:
+                index = _span_index(fact, spans)
+                if index is None or fact["filed"] > as_of_date:
+                    continue
+                if forms and not fact.get("form", "").startswith(forms):
+                    continue
+                periods_by_scope.setdefault(tag_scope, set()).add(
+                    (fact["end"], index))
+    consolidated_periods = periods_by_scope.get("consolidated", set())
     # Tags are tried in meaning order and a period keeps the first one that
     # reports it: filers renamed lines over the years, so one tag covers only
     # part of the history. Values are never added across tags, which would
     # double count.
     for tag in ordered_tags(tags):
+        tag_scope = scope_of(tag)
+        if str(tag_scope) != "consolidated" and (
+                periods_by_scope.get(str(tag_scope), set()) & consolidated_periods):
+            # A tag reporting a period the consolidated line also reports is a
+            # component of that row, so it may not fill any period of it.
+            continue
         for unit, unit_values in ((facts.get(tag) or {}).get("units", {})).items():
             latest: dict[tuple[str, int], dict] = {}
             covered: set[tuple[str, int]] = set()   # periods a filing of ``forms`` reports
@@ -217,7 +256,7 @@ def _as_of_with_provenance(
                 for key, fact in latest.items():
                     provenance[key] = TagProvenance(
                         concept=tag,
-                        scope=scope_of(tag),
+                        scope=tag_scope,
                         accession=fact.get("accn"),
                         form=fact.get("form"),
                         period_start=fact.get("start"),
@@ -226,6 +265,12 @@ def _as_of_with_provenance(
                         # ``companyfacts`` facts carry no axis: a dimensioned
                         # figure appears as a separate concept or not at all.
                         dimensions=(),
+                        cik=cik,
+                        # `companyfacts` states absolute amounts, so the scale
+                        # is the unit's own; `available_at` is the filing date,
+                        # which is the first moment the market could see it.
+                        scale=1,
+                        available_at=fact.get("filed"),
                     )
     return dict(sorted(values.items())), chosen_unit, provenance
 
@@ -248,7 +293,8 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
     else:
         spans, names = (_SPANS["annual"],), [""]
     forms = () if quarterly else _ANNUAL_FORMS
-    lines = {label: _as_of(us_gaap, tags, as_of_date, spans, forms) for label, tags in _STATEMENTS[kind]}
+    lines = {label: _as_of(us_gaap, tags, as_of_date, spans, forms, cik=cik)
+             for label, tags in _STATEMENTS[kind]}
     # Each row takes the shortest span it reports for a period, and a column
     # holds one span of one period, so a row filed only to date keeps its figure
     # beside a row filed by quarter.

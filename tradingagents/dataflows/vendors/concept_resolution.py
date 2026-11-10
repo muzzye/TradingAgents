@@ -98,6 +98,28 @@ class TagProvenance:
     unit: str = "USD"
     dimensions: tuple[tuple[str, str], ...] = ()
     retrieved_at: str | None = None
+    # The filing's identity, so a figure can be traced back to one document
+    # rather than to "a filing somewhere". `cik` names the registrant, `scale`
+    # the magnitude the fact was reported in (a filing may state thousands), and
+    # `available_at` the date the market could first have seen it — the
+    # point-in-time boundary a backtest depends on.
+    cik: str | None = None
+    scale: int | None = None
+    available_at: str | None = None
+    origin: str = "sec_companyfacts"
+
+    @property
+    def validation_status(self) -> str:
+        """Whether this figure may be presented as the consolidated total.
+
+        ``VERIFIED`` needs both halves: a consolidated concept and no dimension
+        (a dimensioned fact is a slice whatever its tag). ``UNVERIFIED`` is the
+        answer when the concept is a subset — the F1 defect was presenting that
+        answer as ``VERIFIED``.
+        """
+        if self.scope is RevenueScope.CONSOLIDATED and not self.is_dimensioned:
+            return "VERIFIED"
+        return "UNVERIFIED"
 
     @property
     def is_consolidated(self) -> bool:
@@ -107,6 +129,7 @@ class TagProvenance:
         answer yes.
         """
         return self.scope is RevenueScope.CONSOLIDATED
+
 
     @property
     def is_dimensioned(self) -> bool:
@@ -122,11 +145,16 @@ class TagProvenance:
         return {
             "concept": self.concept,
             "definition": str(self.scope),
+            "cik": self.cik,
             "accession": self.accession,
             "form": self.form,
             "period_start": self.period_start,
             "period_end": self.period_end,
             "unit": self.unit,
+            "scale": self.scale,
+            "origin": self.origin,
+            "available_at": self.available_at,
+            "validation_status": self.validation_status,
             "dimensions": [{"axis": a, "member": m} for a, m in self.dimensions],
             "consolidation_perimeter": (
                 "consolidated" if self.is_consolidated

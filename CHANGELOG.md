@@ -19,6 +19,38 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-11-10
+
+### Fixed
+
+- **A revenue row can no longer mix scopes across periods.** A filer reporting
+  the consolidated total for the latest quarter and only a component for the
+  prior one produced a row whose two periods measured different things; the
+  growth across them read 76.08% where the consolidated history says 11.24%.
+  A tag reporting a period the consolidated line also reports is now treated as
+  a component of that row and no longer supplies its other periods. A filer that
+  only *renamed* its revenue line keeps its full history: the two tags never
+  report the same period, so neither is a component of the other — the
+  distinction is read from the payload, not from the tag's spelling. (F1)
+- **An unverified revenue concept cannot become the certified metric.** A
+  `Revenues` fact now carries its XBRL provenance into the run's registry —
+  concept, CIK, accession, period, unit, scale, origin, availability date and
+  validation status. A figure whose provenance says `UNVERIFIED` (a subset
+  concept, or a fact dimensioned to one segment) stays in the registry so the
+  audit can show it, but is never usable, so it cannot be quoted as the
+  consolidated total. (F1)
+
+### Added
+
+- **`consolidated_revenue` is a registry metric,** built from the filed fact
+  with its period, so the revenue a report states and the revenue the gate
+  certifies are the same number with the same provenance.
+- **Reproducible SEC fixtures** (`tests/fixtures/sec_revenue_payloads.py`): both
+  scopes present, the component alone, the cross-period gap, a renamed line, an
+  unknown taxonomy, quarterly against year-to-date, duplicated facts, a later
+  amendment, segment-only revenue and an empty payload. The BRK-B values
+  (105,647 / 94,972 / +11.24%) are regression constants, read from the filing.
+
 ## [0.8.1] — 2026-11-10
 
 ### Added
