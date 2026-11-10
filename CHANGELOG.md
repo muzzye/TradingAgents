@@ -19,6 +19,28 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.15] — 2026-11-10
+
+### Fixed
+
+- **A moving average can no longer price a valuation multiple.** The 2026-11-10
+  BRK-B report stated a P/B of 1.49x, which is the 50-day moving average
+  (522.97) divided by book value (352). The share traded near 577 and closed at
+  575.25, so the multiple was 1.63–1.64. `RunInputs` now carries a
+  `price_provenance`, and `_register_dual_class_valuation` refuses the numerator
+  when that provenance names an indicator or is marked `NOT_A_PRICE`: the
+  multiple is recorded as `REFUSED` with the reason, never certified. A caller
+  that supplies no provenance is still treated as having supplied a quote, which
+  is what every earlier caller meant.
+- **The verified market snapshot survives the graph.** `verified_market_snapshot`
+  was not declared on `AgentState`, and `StateGraph(AgentState)` keeps only the
+  keys its schema names — so the snapshot a market analyst read vanished between
+  nodes, `registry_inputs_from_state` found no price, and every P/B came out
+  `NOT_COMPUTABLE` while the report still quoted a multiple. It is now declared,
+  and `price_source.qualified_price()` gives the snapshot a provenance whose
+  kind is derived from the bar's finality (`eod_close`, `intraday`,
+  `unqualified`) rather than asserted by the caller.
+
 ## [0.8.14] — 2026-11-10
 
 ### Fixed

@@ -77,6 +77,12 @@ class AgentState(MessagesState):
     # SEC payload. Declared here because `StateGraph(AgentState)` keeps only the
     # keys its schema names: an undeclared key returned by a node is dropped
     # between nodes, so the registry never saw a figure no report mentioned.
+    # The verified price the market analyst read. Declared for the same reason
+    # the revenue keys are: `StateGraph(AgentState)` keeps only what the schema
+    # names, so an undeclared snapshot vanished between nodes and every P/B came
+    # out NOT_COMPUTABLE while the report still quoted a multiple (FIX #2).
+    verified_market_snapshot: Annotated[dict, "The market snapshot the analyst read: latest OHLCV row, indicators, price provenance and bar finality"]
+
     revenue_consolidated: Annotated[float, "Consolidated revenue the filing states, in base units, as of the period end below"]
     revenue_prior: Annotated[float, "The same quarter a year earlier, when the filing reports it"]
     revenue_provenance: Annotated[dict, "Where revenue_consolidated came from: concept, CIK, accession, period, unit, scale, validation status"]
