@@ -477,3 +477,109 @@ class TestFiscalPeriod:
         # 2028 is the certified year — compared.
         assert len(_reconcile("Ricavi consolidati Q3 2028: 74.322 milioni",
                               registry)) == 1
+
+
+# ===========================================================================
+# Period attribution — each figure gets its own period
+# ===========================================================================
+class TestPeriodAttribution:
+    """The period that qualifies a figure is the one beside it, not the first one.
+
+    The previous implementation read a fixed 120-character window *across line
+    breaks* and took the first period it found. So a correct `Q3 2025: 94.972`
+    on one line supplied the period for `Q3 2026: 74.322` on the next, and the
+    real contradiction was silently dropped.
+    """
+
+    def test_consecutive_rows_each_keep_their_own_period(self):
+        """Two rows: the prior year is context, the current one contradicts."""
+        report = ("Ricavi consolidati Q3 2025: 94.972 milioni USD\n"
+                  "Ricavi consolidati Q3 2026: 74.322 milioni USD")
+        findings = _reconcile(report)
+        assert len(findings) == 1, "the Q3 2026 contradiction was dropped"
+        assert findings[0].claimed_value == COMPONENT
+
+    def test_two_periods_in_one_sentence_bind_to_their_nearest_figure(self):
+        report = ("Ricavi Q3 2025 di 94.972 milioni e "
+                  "ricavi Q3 2026 di 74.322 milioni")
+        findings = _reconcile(report)
+        assert len(findings) == 1
+        assert findings[0].claimed_value == COMPONENT
+
+    def test_the_current_period_stated_correctly_is_silent(self):
+        assert _reconcile("Ricavi consolidati Q3 2026: 105.647 milioni") == []
+
+    def test_the_prior_period_stated_correctly_is_silent(self):
+        assert _reconcile("Ricavi consolidati Q3 2025: 94.972 milioni") == []
+
+    def test_a_two_period_table_compares_only_the_certified_column(self):
+        report = ("| Voce | Q3 2025 | Q3 2026 |\n"
+                  "|---|---|---|\n"
+                  "| Ricavi consolidati | 94.972 | 74.322 |\n\n"
+                  "USD in millions")
+        findings = _reconcile(report)
+        assert len(findings) == 1, "the Q3 2026 cell must be compared"
+        assert findings[0].claimed_value == COMPONENT
+
+    def test_a_two_period_table_whose_current_cell_agrees_is_silent(self):
+        report = ("| Voce | Q3 2025 | Q3 2026 |\n"
+                  "|---|---|---|\n"
+                  "| Ricavi consolidati | 94.972 | 105.647 |\n\n"
+                  "USD in millions")
+        assert _reconcile(report) == []
+
+    def test_a_future_year_is_not_the_certified_period(self):
+        assert _reconcile("Ricavi consolidati Q3 2028: 74.322 milioni") == []
+
+    def test_an_implicit_period_is_still_checked(self):
+        assert len(_reconcile("Ricavi consolidati: 74.322 milioni")) == 1
+
+    def test_a_component_and_a_segment_are_still_excluded(self):
+        assert _reconcile(
+            "Ricavi da contratti con clienti: 74.322 milioni") == []
+        assert _reconcile(
+            "Il segmento assicurativo ha riportato ricavi per 74.322 milioni") == []
+
+    def test_the_finding_is_persisted_and_the_gate_blocks(self, tmp_path):
+        """Point 7: the real mismatch reaches the audit and stops the order."""
+        from tradingagents.dataflows import run_record as rr
+        from tradingagents.dataflows.gate_integration import evaluate_decision
+
+        report = ("Ricavi consolidati Q3 2025: 94.972 milioni USD\n"
+                  "Ricavi consolidati Q3 2026: 74.322 milioni USD")
+        state = _rated_state(report)
+        registry = _certified_registry()
+        record, decision = evaluate_decision(
+            "BRK-B", F.ANALYSIS_DATE, state, snapshot_id="attr",
+            metric_registry=registry, trigger_met=True)
+
+        audit = record.to_dict()
+        findings = audit.get("revenue_claim_findings")
+        assert findings, "the audit must carry the finding"
+        assert findings[0]["claimed_value"] == COMPONENT
+        assert findings[0]["blocks"] is True
+        assert "SEC_REVENUE_CLAIM_MISMATCH" in [r.value for r in decision.reasons]
+        assert decision.creates_order is False
+
+        run = rr.RunRecord(
+            run_id=rr.new_run_id("BRK-B"), ticker="BRK-B",
+            analysis_date=F.ANALYSIS_DATE,
+            revenue_claim_findings=findings,
+            execution_gate=audit.get("execution", {}), audit=audit,
+        )
+        payload = json.loads(rr.write_run(tmp_path, run).read_text(encoding="utf-8"))
+        assert payload["revenue_claim_findings"][0]["claimed_value"] == COMPONENT
+
+    def test_a_correct_prior_year_row_does_not_block_the_gate(self):
+        """The false positive's cost: a sound run was blocked."""
+        from tradingagents.dataflows.gate_integration import evaluate_decision
+
+        state = _rated_state(
+            "Ricavi consolidati Q3 2025: 94.972 milioni USD\n"
+            "Ricavi consolidati Q3 2026: 105.647 milioni USD")
+        registry = _certified_registry()
+        record, decision = evaluate_decision(
+            "BRK-B", F.ANALYSIS_DATE, state, snapshot_id="clean",
+            metric_registry=registry, trigger_met=True)
+        assert record.to_dict().get("revenue_claim_findings") in (None, [])
+        assert "SEC_REVENUE_CLAIM_MISMATCH" not in [r.value for r in decision.reasons]

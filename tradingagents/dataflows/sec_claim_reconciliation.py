@@ -78,7 +78,7 @@ _NAMED_PERIOD = re.compile(
 
 # The scale words, in both languages the reports are written in. `mln`/`mld`
 # are the Italian abbreviations; `M$`/`m$` name millions of dollars.
-_SCALE = (r"billion|million|bn|mn|b|m"
+_SCALE = (r"billions|billion|millions|million|bn|mn|b|m"
           r"|miliardi|miliardo|milioni|milione|mld|mln|m\$")
 
 # A level claim on revenue: a labelled revenue figure with a scale word. The
@@ -88,6 +88,15 @@ _SCALE = (r"billion|million|bn|mn|b|m"
 # The label alternation covers the English and Italian labels the reports use,
 # and the separator allows a Markdown table's pipes so `| Ricavi | 74.322 | mlm |`
 # is read the same way as a sentence.
+# A table states its unit once: "USD in millions", "(in milioni di EUR)",
+# "Q3 2026 (USD m)".
+# Any scale word on the line that declares the table's unit. Anchoring it to a
+# currency prefix was fragile ("USD in millions" has three words between them);
+# a scale word in a caption or header is unambiguous on its own.
+_TABLE_SCALE = re.compile(r"(?i)\b(" + _SCALE + r")\b")
+# The label that makes a table row a revenue row.
+_REVENUE_LABEL = re.compile(
+    r"(?i)(revenue|ricavi|fatturato)")
 _LEVEL_CLAIM = re.compile(
     r"(?:total\s+revenue|consolidated\s+revenue|revenues?\s+(?:was|were|of|at|came\s+to|totall?ed)"
     r"|revenues?\s*[:=]"
@@ -135,9 +144,10 @@ class RevenueClaimFinding:
         }
 
 
-_BILLIONS = frozenset({"billion", "bn", "b", "miliardi", "miliardo", "mld"})
-_MILLIONS = frozenset({"million", "mn", "m", "milioni", "milione", "mln",
-                       "m$"})
+_BILLIONS = frozenset({"billion", "billions", "bn", "b",
+                       "miliardi", "miliardo", "mld"})
+_MILLIONS = frozenset({"million", "millions", "mn", "m",
+                       "milioni", "milione", "mln", "m$"})
 
 
 def _parse_figure(raw: str, scale_word: str = "") -> float | None:
@@ -245,24 +255,144 @@ def _certified_period(record) -> tuple[int | None, int | None]:
     return quarter, year
 
 
-def _named_period(context: str) -> tuple[int | None, int | None, bool]:
+def _named_period(context: str, value_at: int | None = None,
+                  ) -> tuple[int | None, int | None, bool]:
     """The (quarter, year, explicit) a sentence names, or all-None.
 
     ``explicit`` says whether the sentence named a period at all: a figure with
     no period beside it is a claim on the current one, and is still checked —
     that is the case the check exists for.
+
+    When the sentence names **more than one** period, the one nearest the value
+    is the one that qualifies it:
+
+        "Ricavi Q3 2025 di 94.972 milioni, in calo rispetto ai Q3 2026 di 74.322"
+
+    The first period belongs to the first figure. ``value_at`` is the offset of
+    the number inside ``context``; when it is absent the first period is kept,
+    which is what a single-period sentence yields anyway.
     """
-    match = _NAMED_PERIOD.search(context)
-    if not match:
+    matches = list(_NAMED_PERIOD.finditer(context))
+    if not matches:
         return None, None, False
-    quarter = match.group(1) or match.group(4)
-    year = match.group(2) or match.group(3) or match.group(6) or match.group(7)
+    chosen = matches[0]
+    if value_at is not None:
+        # The nearest period *before* the figure qualifies it; a period after
+        # the figure only applies when none precedes it (a table cell pair).
+        preceding = [m for m in matches if m.end() <= value_at]
+        if preceding:
+            chosen = preceding[-1]
+        else:
+            chosen = min(matches, key=lambda m: abs(m.start() - value_at))
+    quarter = chosen.group(1) or chosen.group(4)
+    year = chosen.group(2) or chosen.group(3) or chosen.group(6) or chosen.group(7)
     return (int(quarter) if quarter else None,
             int(year) if year else None,
             True)
 
 
-def _period_is_comparable(context: str, record) -> bool:
+def _claim_context(text: str, start: int, end: int) -> str:
+    """The text that qualifies one claim: its own line, plus the row above.
+
+    Two things the previous 120-character window got wrong:
+
+    - **It crossed a line break.** A period on the previous row qualified the
+      figure on the next one, so `Q3 2025: 94.972` followed by `Q3 2026: 74.322`
+      was read as two Q3 2025 claims and the real contradiction was dropped.
+    - **It was measured in characters, not lines.** In a table the same window
+      reached back several rows.
+
+    The context is therefore the claim's own line, and — only when that line
+    carries no period of its own — the line directly above, which is how a
+    table with a period column to the left is read::
+
+        | Q3 2026 | 74.322 |
+
+    ``value_at`` inside the returned string tells the caller where the figure
+    sits, so the nearest period wins when the line names more than one.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    own = text[line_start:line_end]
+    if _NAMED_PERIOD.search(own):
+        return own
+
+    # No period on this line: a table puts it in a preceding cell or row.
+    previous_start = text.rfind("\n", 0, max(0, line_start - 1)) + 1
+    previous = text[previous_start:line_start].strip() if line_start > 0 else ""
+    if previous and _NAMED_PERIOD.search(previous):
+        return previous + " " + own
+    return own
+
+
+def _table_column_scale(text: str, column: int) -> str:
+    """The scale a table states for its figures, from the header or a caption.
+
+    A row like ``| Ricavi consolidati | 94.972 | 105.647 |`` states bare
+    numbers; the unit comes from the table's own header ("USD in millions") or
+    from the column heading ("Q3 2026 (USD m)"). Reading it is what keeps
+    `105.647` from being compared as one hundred thousand dollars against a
+    hundred-billion-dollar filing.
+
+    Returns the scale word, or ``""`` when the table states none — in which
+    case the figure is compared on its own value, which is the honest reading.
+    """
+    lines = text.splitlines()
+    # The header row or any caption line above the data.
+    for line in lines:
+        if not line.strip():
+            continue
+        match = _TABLE_SCALE.search(line)
+        if match:
+            return (match.group(1) or match.group(2) or "").lower()
+    return ""
+
+
+def _table_header_periods(text: str) -> list[tuple[int, int | None, int | None]]:
+    """The periods a Markdown table's header names, with their column index.
+
+    A table with two temporal columns states its periods once, in the header::
+
+        | Voce | Q3 2025 | Q3 2026 |
+        | Ricavi consolidati | 94.972 | 74.322 |
+
+    Each data cell inherits the period of its own column, which is the only
+    reading that makes the row mean anything. Returns ``[(column, quarter,
+    year)]`` for the header rows this finds; an empty list when there is none.
+    """
+    found: list[tuple[int, int | None, int | None]] = []
+    for line in text.splitlines():
+        if "|" not in line or not _NAMED_PERIOD.search(line):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        periods: list[tuple[int, int | None, int | None]] = []
+        for index, cell in enumerate(cells):
+            match = _NAMED_PERIOD.search(cell)
+            if not match:
+                continue
+            quarter = match.group(1) or match.group(4)
+            year = (match.group(2) or match.group(3)
+                    or match.group(6) or match.group(7))
+            periods.append((index,
+                            int(quarter) if quarter else None,
+                            int(year) if year else None))
+        if len(periods) >= 2:
+            return periods
+        found = found or periods
+    return found
+
+
+def _cell_column(line: str, offset: int) -> int | None:
+    """Which table cell ``offset`` falls in, counting from zero."""
+    prefix = line[:offset]
+    if "|" not in prefix and "|" not in line:
+        return None
+    return prefix.count("|")
+
+
+def _period_is_comparable(context: str, record, value_at: int | None = None) -> bool:
     """Whether a figure stated in ``context`` is about the certified period.
 
     Three outcomes, and the middle one is why this is arithmetic rather than a
@@ -278,7 +408,7 @@ def _period_is_comparable(context: str, record) -> bool:
     if _HISTORICAL_WORDS.search(context):
         return False
 
-    claimed_quarter, claimed_year, explicit = _named_period(context)
+    claimed_quarter, claimed_year, explicit = _named_period(context, value_at)
     if not explicit:
         return True
 
@@ -324,27 +454,102 @@ def reconcile_revenue_claims(registry: Any, reports: dict[str, str | None],
             # The label that identified the claim is part of the sentence that
             # qualifies it: "ricavi da contratti con clienti" carries its own
             # "contratti", which appears *inside* the match, not before it.
-            context = text[max(0, match.start() - 120):match.end()]
+            context = _claim_context(text, match.start(), match.end())
             if _COMPONENT_MARKERS.search(context):
                 continue
-            if not _period_is_comparable(context, record):
+            # Where the figure sits inside the context, so a line naming two
+            # periods gives each figure its own.
+            number_offset = context.find(match.group(1))
+            if not _period_is_comparable(
+                    context, record,
+                    number_offset if number_offset >= 0 else None):
                 continue
             claimed = _scale_value(match.group(1), match.group(2))
             if claimed is None:
                 continue
             if abs(claimed - sec_value) <= abs(sec_value) * (tolerance_pct / 100):
                 continue
-            findings.append(RevenueClaimFinding(
-                code=CODE, metric_id=METRIC_ID, sec_value=sec_value,
-                claimed_value=claimed, period_end=period_end,
-                unit=getattr(record, "unit", "USD"), agent=agent,
-                accession=accession,
-                description=(
-                    f"the {agent} report states consolidated revenue of "
-                    f"{claimed:,.0f} {getattr(record, 'unit', 'USD')} for "
-                    f"{period_end or 'the period'}, while the filing states "
-                    f"{sec_value:,.0f}"),
-            ))
+            findings.append(_finding(agent, claimed, sec_value, period_end,
+                                     record, accession))
+        findings.extend(_table_row_findings(text, agent, record, sec_value,
+                                            period_end, accession,
+                                            tolerance_pct))
+    return findings
+
+
+def _finding(agent: str, claimed: float, sec_value: float,
+             period_end: str | None, record, accession: str | None,
+             *, stated_period: str | None = None) -> RevenueClaimFinding:
+    """One finding, with the values and the provenance it needs."""
+    unit = getattr(record, "unit", "USD")
+    period = stated_period or period_end or "the period"
+    return RevenueClaimFinding(
+        code=CODE, metric_id=METRIC_ID, sec_value=sec_value,
+        claimed_value=claimed, period_end=period_end, unit=unit,
+        agent=agent, accession=accession,
+        description=(f"the {agent} report states consolidated revenue of "
+                     f"{claimed:,.0f} {unit} for {period}, while the filing "
+                     f"states {sec_value:,.0f}"),
+    )
+
+
+def _table_row_findings(text: str, agent: str, record, sec_value: float,
+                        period_end: str | None, accession: str | None,
+                        tolerance_pct: float) -> list[RevenueClaimFinding]:
+    """Claims living in a revenue table row, qualified by its period header.
+
+    A two-period table states the periods once, in the header, and each cell
+    inherits its own column's::
+
+        | Voce | Q3 2025 | Q3 2026 |
+        | Ricavi consolidati | 94.972 | 74.322 |
+
+    Only the **certified column** is compared — the prior year's cell is
+    context, which is the same rule the sentence path applies. A row whose
+    label names a component or a segment is skipped entirely.
+    """
+    headers = _table_header_periods(text)
+    if not headers:
+        return []
+    certified_quarter, certified_year = _certified_period(record)
+    if certified_year is None:
+        return []
+
+    # The column whose header names the certified period.
+    certified_columns = [
+        column for column, quarter, year in headers
+        if year == certified_year
+        and (quarter is None or certified_quarter is None
+             or quarter == certified_quarter)
+    ]
+    if not certified_columns:
+        return []
+
+    findings: list[RevenueClaimFinding] = []
+    for line in text.splitlines():
+        if "|" not in line or not _REVENUE_LABEL.search(line):
+            continue
+        if _COMPONENT_MARKERS.search(line):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        for column in certified_columns:
+            if column >= len(cells):
+                continue
+            cell = cells[column]
+            figure = re.match(r"^(\d[\d,.]*)\s*("
+                              + _SCALE + r")?\b", cell, re.IGNORECASE)
+            if not figure:
+                continue
+            scale = figure.group(2) or _table_column_scale(text, column)
+            claimed = _scale_value(figure.group(1), scale)
+            if claimed is None:
+                continue
+            if abs(claimed - sec_value) <= abs(sec_value) * (tolerance_pct / 100):
+                continue
+            stated = f"Q{certified_quarter} {certified_year}" if certified_quarter \
+                else str(certified_year)
+            findings.append(_finding(agent, claimed, sec_value, period_end,
+                                     record, accession, stated_period=stated))
     return findings
 
 

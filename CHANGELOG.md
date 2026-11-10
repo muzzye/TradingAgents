@@ -19,6 +19,25 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.13] — 2026-11-10
+
+### Fixed
+
+- **Each revenue figure is qualified by its own period.** The check read a
+  fixed 120-character window that crossed line breaks, and took the *first*
+  period it found. A correct `Ricavi consolidati Q3 2025: 94.972 milioni` on one
+  line therefore supplied the period for `Q3 2026: 74.322` on the next, and the
+  real contradiction was dropped — a sound run passed while a contradicted one
+  went unreported. The context is now the claim's own line (plus the row above
+  only when its own line names no period, which is how a table's period column
+  is read), and when a line names several periods the one nearest the figure
+  qualifies it.
+- **A two-period Markdown table is compared by column.** `| Voce | Q3 2025 |
+  Q3 2026 |` states its periods once in the header; each data cell now inherits
+  its own column's period, and only the certified column is compared. The
+  table's declared unit (`USD in millions`) is read too, so a bare `105.647`
+  cell is not compared as one hundred thousand dollars.
+
 ## [0.8.12] — 2026-11-10
 
 ### Fixed
