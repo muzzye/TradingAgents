@@ -19,6 +19,28 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.8] — 2026-11-10
+
+### Fixed
+
+- **`consolidated_revenue` now comes from the SEC filing, not from a regex over
+  the analyst's prose.** The 2026-11-10 16:15 BRK-B report stated Q3 2026
+  revenue of 105,647 million and showed
+  `consolidated_revenue: NOT_COMPUTABLE — "no consolidated revenue was filed or
+  reported"`. Both cannot be true. `RunInputs.revenue_consolidated` was
+  populated only by `math/extraction.py`, which reads a labelled sentence out of
+  the fundamentals report, so a figure the filing states authoritatively was
+  made conditional on how a model worded it. New
+  `math/sec_revenue_inputs.py` reads the `companyfacts` payload the SEC provider
+  already returns, selects the consolidated concept through the same
+  `concept_resolution` ordering the statement writer uses, and carries the
+  provenance the registry records: concept, CIK, accession, period, unit, scale
+  and validation status. The data-quality node publishes those inputs into the
+  run's state, which is the link that was missing.
+  A component (`RevenueFromContractWithCustomerExcludingAssessedTax`) still
+  cannot fill the consolidated metric, and an unavailable source leaves it
+  `NOT_COMPUTABLE` rather than inventing a value.
+
 ## [0.8.7] — 2026-11-10
 
 ### Fixed
