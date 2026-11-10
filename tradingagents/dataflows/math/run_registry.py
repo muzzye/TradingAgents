@@ -347,17 +347,39 @@ def build_run_registry(inputs: RunInputs, *, run_id: str = "") -> MetricRegistry
     # P/E of 14.51 was certified from a vendor figure the reconciliation had
     # just marked UNSUPPORTED, so the report could quote a multiple built on
     # an unverified input while the audit said the input was unverified.
+    #
+    # FIX #3: the P/E is a valuation multiple with the same numerator rule as
+    # the P/B, but it lives outside `_register_dual_class_valuation`, so that
+    # path's `price_is_qualified` guard never reached it. The registry then
+    # contradicted itself in one table — the P/B refused because "the numerator
+    # is not a market price" while the P/E, from the identical number, was
+    # certified. An analyst could quote the SMA50-derived P/E and the validator
+    # agreed, because the metric it compared against was itself built on the
+    # indicator: agreement with a wrong baseline launders the claim.
     if inputs.price is not None and inputs.eps_ttm is not None \
             and inputs.weighted_average_shares:
-        _register_if_computable(
-            registry, "pe_trailing",
-            price_to_earnings(inputs.price, inputs.eps_ttm).value,
-            unit="multiple", formula_id="price_div_eps_trailing_gaap",
-            operands={"price": inputs.price, "eps": inputs.eps_ttm,
-                      "weighted_average_shares": inputs.weighted_average_shares},
-            reason="the price or the trailing EPS is unavailable",
-            source_status=_source_of(inputs, "price", "eps_ttm"),
-        )
+        if not price_is_qualified(inputs):
+            registry.register(metric(
+                "pe_trailing", None, unit="multiple",
+                formula_id="price_div_eps_trailing_gaap",
+                operands={"price": inputs.price, "eps": inputs.eps_ttm,
+                          "price_provenance": inputs.price_provenance,
+                          "weighted_average_shares": inputs.weighted_average_shares},
+                calculation_status=CalculationStatus.REFUSED,
+                reason=("the numerator is not a market price: an indicator or "
+                        "an unqualified figure cannot price a valuation "
+                        "multiple"),
+            ))
+        else:
+            _register_if_computable(
+                registry, "pe_trailing",
+                price_to_earnings(inputs.price, inputs.eps_ttm).value,
+                unit="multiple", formula_id="price_div_eps_trailing_gaap",
+                operands={"price": inputs.price, "eps": inputs.eps_ttm,
+                          "weighted_average_shares": inputs.weighted_average_shares},
+                reason="the price or the trailing EPS is unavailable",
+                source_status=_source_of(inputs, "price", "eps_ttm"),
+            )
     else:
         # No denominator: the EPS is not a certified fact, so neither is the
         # multiple. Recorded rather than omitted — a silent gap reads as "not

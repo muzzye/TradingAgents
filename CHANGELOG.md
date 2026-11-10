@@ -19,6 +19,32 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.20] — 2026-11-10
+
+### Fixed
+
+- **A trailing P/E can no longer be certified from an indicator.** FIX #2
+  established that a valuation multiple needs a market price as its numerator
+  and enforced it in `_register_dual_class_valuation`. The trailing P/E is a
+  valuation multiple built from the same `inputs.price` but registered outside
+  that path, so the guard never reached it. The registry therefore contradicted
+  itself in a single Certified Metrics table: `price_to_book` was refused because
+  "the numerator is not a market price" while `pe_trailing`, from the identical
+  number, came out `certified`. A 50-period moving average offered as the price
+  produced a certified 77.48x. The P/E now applies the same `price_is_qualified`
+  test before any arithmetic, and records the refusal with the provenance that
+  failed. Metrics that use the price as a level rather than a valuation
+  (`session_return`, `distance_from_*`) are untouched: a return or a distance is
+  a comparison, not a multiple.
+
+### Known limitation
+
+- The report validator extracts P/B claims but not P/E claims, so an analyst
+  quoting the indicator-derived P/E does not, on its own, raise a
+  `NUMERIC_CLAIM_MISMATCH`. This fix removes the certified figure such a claim
+  would rest on — there is no longer a `VERIFIED` multiple to agree with — but
+  the claim-extraction gap is separate and is not resolved here.
+
 ## [0.8.19] — 2026-11-10
 
 ### Fixed
