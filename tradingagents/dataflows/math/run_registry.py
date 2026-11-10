@@ -268,24 +268,55 @@ def build_run_registry(inputs: RunInputs, *, run_id: str = "") -> MetricRegistry
 
     registry = MetricRegistry(run_id=run_id)
 
+    # A return or a distance is the change in a *security's* price between two
+    # sessions, or how far that price sits from a level. Feeding either an
+    # indicator yields a number that reads like market information and is not:
+    # "the stock rose 0.57%" computed from a moving average is a fabricated
+    # observation, not a measured one. They take the same numerator rule as the
+    # valuation multiples. The indicators themselves remain valid inputs to
+    # these formulas — only `price` must be a price.
+    #
+    # An absent price is a *gap*, not a contradiction: nothing was offered, so
+    # NOT_COMPUTABLE is the honest status and the metric stays non-blocking.
+    # A price that was offered and cannot be qualified is a refusal, and does
+    # block — see `MetricRecord.blocks_decision`.
+    price_offered = inputs.price is not None
+    price_usable = price_is_qualified(inputs)
+    price_refusal = ("the current price is not a market price: an indicator "
+                     "or an unqualified figure cannot measure a session move "
+                     "or a distance from a level")
+
+    def _price_derived(name: str, value: Any, *, operands: dict[str, Any],
+                       reason: str) -> None:
+        if price_offered and not price_usable:
+            registry.register(metric(
+                name, None, unit="percent", formula_id="pct_change",
+                operands={**operands, "price_provenance": inputs.price_provenance},
+                calculation_status=CalculationStatus.REFUSED,
+                reason=price_refusal,
+            ))
+            return
+        _register_if_computable(
+            registry, name, value, unit="percent", formula_id="pct_change",
+            operands=operands, reason=reason,
+        )
+
     # Price distances: the figures a market report quotes most often.
     for name, level in (("distance_from_sma50", inputs.sma50),
                         ("distance_from_sma200", inputs.sma200),
                         ("distance_from_high", inputs.period_high)):
-        _register_if_computable(
-            registry, name,
-            distance_from_level(inputs.price, level) if inputs.price is not None
+        _price_derived(
+            name,
+            distance_from_level(inputs.price, level) if price_usable
             and level is not None else None,
-            unit="percent", formula_id="pct_change",
             operands={"price": inputs.price, "level": level},
             reason="the price or the reference level is unavailable",
         )
 
-    _register_if_computable(
-        registry, "session_return",
+    _price_derived(
+        "session_return",
         pct_change(inputs.price, inputs.previous_close)
-        if inputs.price is not None and inputs.previous_close is not None else None,
-        unit="percent", formula_id="pct_change",
+        if price_usable and inputs.previous_close is not None else None,
         operands={"price": inputs.price, "previous_close": inputs.previous_close},
         reason="the price or the previous close is unavailable",
     )
@@ -347,17 +378,44 @@ def build_run_registry(inputs: RunInputs, *, run_id: str = "") -> MetricRegistry
     # P/E of 14.51 was certified from a vendor figure the reconciliation had
     # just marked UNSUPPORTED, so the report could quote a multiple built on
     # an unverified input while the audit said the input was unverified.
+    #
+    # FIX #3: the P/E is a valuation multiple with the same numerator rule as
+    # the P/B, but it lives outside `_register_dual_class_valuation`, so that
+    # path's `price_is_qualified` guard never reached it. The registry then
+    # contradicted itself in one table — the P/B refused because "the numerator
+    # is not a market price" while the P/E, from the identical number, was
+    # certified. That is the defect this guard closes.
+    #
+    # What it does *not* close: the report validator extracts P/B claims but
+    # not P/E ones, so an analyst quoting the indicator-derived P/E raises no
+    # NUMERIC_CLAIM_MISMATCH of its own. Removing the certified figure is what
+    # this fix offers — there is no longer a VERIFIED multiple such a claim
+    # could rest on — and closing the extraction gap is separate work. Do not
+    # read this guard as making a reported P/E claim block.
     if inputs.price is not None and inputs.eps_ttm is not None \
             and inputs.weighted_average_shares:
-        _register_if_computable(
-            registry, "pe_trailing",
-            price_to_earnings(inputs.price, inputs.eps_ttm).value,
-            unit="multiple", formula_id="price_div_eps_trailing_gaap",
-            operands={"price": inputs.price, "eps": inputs.eps_ttm,
-                      "weighted_average_shares": inputs.weighted_average_shares},
-            reason="the price or the trailing EPS is unavailable",
-            source_status=_source_of(inputs, "price", "eps_ttm"),
-        )
+        if not price_is_qualified(inputs):
+            registry.register(metric(
+                "pe_trailing", None, unit="multiple",
+                formula_id="price_div_eps_trailing_gaap",
+                operands={"price": inputs.price, "eps": inputs.eps_ttm,
+                          "price_provenance": inputs.price_provenance,
+                          "weighted_average_shares": inputs.weighted_average_shares},
+                calculation_status=CalculationStatus.REFUSED,
+                reason=("the numerator is not a market price: an indicator or "
+                        "an unqualified figure cannot price a valuation "
+                        "multiple"),
+            ))
+        else:
+            _register_if_computable(
+                registry, "pe_trailing",
+                price_to_earnings(inputs.price, inputs.eps_ttm).value,
+                unit="multiple", formula_id="price_div_eps_trailing_gaap",
+                operands={"price": inputs.price, "eps": inputs.eps_ttm,
+                          "weighted_average_shares": inputs.weighted_average_shares},
+                reason="the price or the trailing EPS is unavailable",
+                source_status=_source_of(inputs, "price", "eps_ttm"),
+            )
     else:
         # No denominator: the EPS is not a certified fact, so neither is the
         # multiple. Recorded rather than omitted — a silent gap reads as "not

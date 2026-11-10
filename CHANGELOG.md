@@ -19,6 +19,76 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.22] — 2026-11-10
+
+### Fixed
+
+- **A code comment claimed a mechanism the code does not implement.** The
+  FIX #3 guard on the trailing P/E carried a note saying the registry validator
+  "agreed" with an indicator-derived P/E because the metric it compared against
+  was itself built on the indicator, so "agreement with a wrong baseline
+  launders the claim". Running the code disproves it: the validator extracts P/B
+  claims but never P/E claims, so there is no comparison and no laundering. The
+  comment now states what the guard actually does and what it explicitly does
+  not do. A new test asserts the limitation itself, so the two cannot drift
+  apart again — if P/E claim extraction is ever added, that test fails and the
+  comment must be corrected with it.
+
+## [0.8.21] — 2026-11-10
+
+### Fixed
+
+- **A session return and a distance from a level now need a market price too.**
+  The previous commit refused an indicator as the numerator of a trailing P/E
+  but left `session_return`, `distance_from_sma50`, `distance_from_sma200` and
+  `distance_from_high` computing from the same unqualified `inputs.price`. They
+  are equally price-derived: "the stock rose 0.57%" computed from a moving
+  average is a fabricated observation, not a measured one, and it appeared in
+  the Certified Metrics table as `certified` beside a P/B refused for exactly
+  that numerator. All four now apply the same `price_is_qualified` test.
+
+  The two failure modes are kept distinct, because they mean different things:
+  a price that was **offered** and cannot be qualified is `REFUSED` and joins
+  the blocking set; a price that was **never offered** stays `NOT_COMPUTABLE`
+  and remains a reported gap, not a contradiction.
+
+- The indicators themselves are untouched. SMA50, SMA200, ATR and the period
+  high remain valid inputs to these formulas and to the risk engine — only the
+  `price` slot must hold a price. `eps_gaap` is unaffected: it divides net
+  income by share count and involves no price at all.
+
+### Changed
+
+- The legacy fixture in `test_fix2_pb_price_source.py` that exercised the
+  indicator path now declares its price provenance, as the state path does. The
+  rule was not relaxed for the test.
+
+## [0.8.20] — 2026-11-10
+
+### Fixed
+
+- **A trailing P/E can no longer be certified from an indicator.** FIX #2
+  established that a valuation multiple needs a market price as its numerator
+  and enforced it in `_register_dual_class_valuation`. The trailing P/E is a
+  valuation multiple built from the same `inputs.price` but registered outside
+  that path, so the guard never reached it. The registry therefore contradicted
+  itself in a single Certified Metrics table: `price_to_book` was refused because
+  "the numerator is not a market price" while `pe_trailing`, from the identical
+  number, came out `certified`. A 50-period moving average offered as the price
+  produced a certified 77.48x. The P/E now applies the same `price_is_qualified`
+  test before any arithmetic, and records the refusal with the provenance that
+  failed. Metrics that use the price as a level rather than a valuation
+  (`session_return`, `distance_from_*`) are untouched: a return or a distance is
+  a comparison, not a multiple.
+
+### Known limitation
+
+- The report validator extracts P/B claims but not P/E claims, so an analyst
+  quoting the indicator-derived P/E does not, on its own, raise a
+  `NUMERIC_CLAIM_MISMATCH`. This fix removes the certified figure such a claim
+  would rest on — there is no longer a `VERIFIED` multiple to agree with — but
+  the claim-extraction gap is separate and is not resolved here.
+
 ## [0.8.19] — 2026-11-10
 
 ### Fixed
