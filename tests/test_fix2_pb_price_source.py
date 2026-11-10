@@ -28,6 +28,7 @@ import pytest
 
 from tests.fixtures import sec_revenue_payloads as F
 from tradingagents.dataflows.math.metric_record import CalculationStatus
+from tradingagents.dataflows.math.price_source import qualified_price
 from tradingagents.dataflows.math.run_registry import RunInputs, build_run_registry
 
 pytestmark = pytest.mark.unit
@@ -268,11 +269,22 @@ class TestT11Persistence:
     def test_the_certified_table_shows_the_pb(self):
         from tradingagents.dataflows.certified_report import render_metric_table
 
-        registry = build_run_registry(
-            RunInputs(price=EOD_CLOSE, book_value_per_share=BVPS), run_id="t11b")
+        inputs = RunInputs(
+            price=EOD_CLOSE,
+            price_provenance={
+                "kind": "eod_close",
+                "timestamp": "2026-11-09T21:00:00+00:00",
+                "validation_status": "VERIFIED"},
+            equity=761_368_000_000.0,
+            equity_period_end="2026-09-30",
+            shares_class_a=550_000.0,
+            shares_class_b=1_400_000_000.0,
+            class_a_to_b_ratio=1500.0,
+        )
+        registry = build_run_registry(inputs, run_id="t11b")
         table = render_metric_table(registry)
         row = next(line for line in table.splitlines() if "`price_to_book`" in line)
-        assert "1.63" in row
+        assert "1.68" in row
         assert "certified" in row
 
 
@@ -305,14 +317,9 @@ class TestT12T13NoRegression:
 # The real graph path
 # ===========================================================================
 class TestCompiledGraphPath:
-    """A `StateGraph(AgentState)`, not a dict merge.
+    """A `StateGraph(AgentState)`, not a dict merge."""
 
-    The defect's first half is that nothing puts a price into the state, so the
-    only way to show it is fixed is to run a compiled graph and read what the
-    registry gets from it.
-    """
-
-    def _graph_state(self, report: str, snapshot: dict):
+    def _graph_state(self, report: str, snapshot: dict, state_fields: dict | None = None):
         from langgraph.graph import END, StateGraph
 
         from tradingagents.agents.state import AgentState
@@ -321,48 +328,269 @@ class TestCompiledGraphPath:
         graph.add_node("analyst", lambda s: {"fundamentals_report": report})
         graph.set_entry_point("analyst")
         graph.add_edge("analyst", END)
-        return graph.compile().invoke({
-            "company_of_interest": "BRK-B", "trade_date": "2026-11-10",
-            "messages": [], "fundamentals_report": "",
+        state = {
+            "company_of_interest": "BRK-B",
+            "trade_date": "2026-11-10",
+            "messages": [],
             "verified_market_snapshot": snapshot,
-        })
+        }
+        if state_fields:
+            state.update(state_fields)
+        return graph.compile().invoke(state)
 
     def test_a_snapshot_price_reaches_the_registry(self):
         from tradingagents.dataflows.math.extraction import extract_run_inputs
-        from tradingagents.graph.trading_graph import _merge_extracted
-
-        # The report states no BVPS, so the book value must come from the state
-        # — as a filed figure would arrive from the data-quality node.
-        state = self._graph_state(
-            "Berkshire trades at a P/B of 1.49x.",
-            {"close": INTRADAY_PRICE})
-        state["book_value_per_share"] = BVPS
         from tradingagents.dataflows.math.run_registry import (
+            build_run_registry,
             registry_inputs_from_state,
         )
+        from tradingagents.graph.trading_graph import _merge_extracted
 
-        merged = _merge_extracted(registry_inputs_from_state(state),
-                                  extract_run_inputs(state).inputs)
+        state = self._graph_state(
+            "Berkshire trades at a P/B of 1.49x.",
+            {"close": EOD_CLOSE,
+             "validation_status": "VERIFIED",
+             "timestamp": "2026-11-09T21:00:00+00:00"})
+        state["equity"] = 761_368_000_000.0
+        state["equity_period_end"] = "2026-09-30"
+        state["shares_class_a"] = 550_000.0
+        state["shares_class_b"] = 1_400_000_000.0
+        state["class_a_to_b_ratio"] = 1500.0
+
+        merged = _merge_extracted(
+            registry_inputs_from_state(state),
+            extract_run_inputs(state).inputs)
         registry = build_run_registry(merged, run_id="graph")
         metric = registry.get("price_to_book")
-        assert metric.value is not None, "the snapshot price never reached the engine"
-        assert float(metric.value) == pytest.approx(EXPECTED_INTRADAY_PB, abs=1e-3)
+        assert metric.is_usable is True
+        assert float(metric.value) == pytest.approx(1.68, abs=0.01)
 
-    def test_an_indicator_in_the_snapshot_cannot_price_the_pb(self):
-        """The SMA50 offered as the close is refused, from the graph's own state."""
+
+# ===========================================================================
+# Production path — the node, not the test, produces the snapshot
+# ===========================================================================
+class TestProductionPath:
+    """The data-quality node builds the snapshot from a provider (FIX #2 A).
+
+    Injecting `verified_market_snapshot` into a test's initial state proves
+    nothing about production: the node is what runs there. These tests drive a
+    compiled graph whose node receives a provider, so the snapshot is produced
+    by the code path a real run uses.
+    """
+
+    def _run(self, bar: dict | None, accounting_payload: dict | None = None):
+        from langgraph.graph import END, StateGraph
+
+        from tradingagents.agents.state import AgentState
+        from tradingagents.graph.data_quality_node import (
+            create_data_quality_check,
+        )
+
+        node = create_data_quality_check(
+            filings_provider=lambda t, d: [],
+            sec_facts_provider=(lambda t, d: accounting_payload)
+            if accounting_payload else (lambda t, d: None),
+            price_provider=(lambda t, d: bar) if bar else (lambda t, d: None),
+        )
+        graph = StateGraph(AgentState)
+        graph.add_node("dq", node)
+        graph.add_node("analyst", lambda s: {"fundamentals_report": ""})
+        graph.set_entry_point("dq")
+        graph.add_edge("dq", "analyst")
+        graph.add_edge("analyst", END)
+        return graph.compile().invoke({
+            "company_of_interest": "BRK-B", "trade_date": "2026-11-10",
+            "messages": [], "fundamentals_report": "",
+        })
+
+    def test_the_node_publishes_a_qualified_snapshot(self):
+        state = self._run({
+            "close": INTRADAY_PRICE, "session_date": "2026-11-10",
+            "bar_finality": "INTRADAY_PARTIAL",
+            "timestamp": "2026-11-10T16:00:00+00:00", "source": "yfinance"})
+        snapshot = state.get("verified_market_snapshot")
+        assert snapshot, "the node produced no snapshot"
+        provenance = snapshot["price_provenance"]
+        for field in ("symbol", "value", "currency", "share_class", "kind",
+                      "timestamp", "session_date", "source", "bar_finality",
+                      "validation_status"):
+            assert field in provenance, field
+        assert provenance["kind"] == "intraday"
+        assert provenance["validation_status"] == "VERIFIED"
+
+    def test_the_node_publishes_accounting_facts_from_the_filing(self):
+        payload = {"facts": {"us-gaap": {
+            "StockholdersEquity": {"units": {"USD": [
+                {"val": 761_368_000_000, "end": "2026-09-30",
+                 "filed": "2026-11-09", "form": "10-Q"}]}},
+            "CommonStockClassASharesOutstanding": {"units": {"shares": [
+                {"val": 550_000}]}},
+            "CommonStockClassBSharesOutstanding": {"units": {"shares": [
+                {"val": 1_400_000_000}]}},
+            "ExchangeRatioOfClassACommonStockToClassBCommonStock": {
+                "units": {"pure": [{"val": 1500}]}},
+        }}}
+        state = self._run(None, payload)
+        assert state.get("equity") == pytest.approx(761_368_000_000.0)
+        assert state.get("shares_class_b") == pytest.approx(1_400_000_000.0)
+        assert state.get("class_a_to_b_ratio") == pytest.approx(1500.0)
+        assert state.get("book_value_per_share") == pytest.approx(
+            761_368_000_000 / 2_225_000_000, rel=1e-9)
+
+    def test_a_failure_to_price_leaves_no_snapshot(self):
+        state = self._run(None)
+        assert not state.get("verified_market_snapshot")
+
+    def test_the_snapshot_and_accounting_reach_the_registry(self):
+        """The whole chain: provider → node → state → registry."""
         from tradingagents.dataflows.math.extraction import extract_run_inputs
-        from tradingagents.dataflows.math.price_source import indicator_as_price
         from tradingagents.dataflows.math.run_registry import (
             registry_inputs_from_state,
         )
         from tradingagents.graph.trading_graph import _merge_extracted
 
-        state = self._graph_state(
-            "Berkshire trades at a P/B of 1.49x.",
-            {"close": SMA50,
-             "price_provenance": indicator_as_price("sma50", SMA50)})
-        state["book_value_per_share"] = BVPS
-        merged = _merge_extracted(registry_inputs_from_state(state),
-                                  extract_run_inputs(state).inputs)
-        registry = build_run_registry(merged, run_id="graph2")
+        payload = {"facts": {"us-gaap": {
+            "StockholdersEquity": {"units": {"USD": [
+                {"val": 761_368_000_000, "end": "2026-09-30",
+                 "filed": "2026-11-09", "form": "10-Q"}]}},
+            "CommonStockClassASharesOutstanding": {"units": {"shares": [
+                {"val": 550_000}]}},
+            "CommonStockClassBSharesOutstanding": {"units": {"shares": [
+                {"val": 1_400_000_000}]}},
+            "ExchangeRatioOfClassACommonStockToClassBCommonStock": {
+                "units": {"pure": [{"val": 1500}]}},
+        }}}
+        state = self._run({
+            "close": EOD_CLOSE, "session_date": "2026-11-09",
+            "bar_finality": "EOD_CONFIRMED", "source": "yfinance"}, payload)
+
+        merged = _merge_extracted(
+            registry_inputs_from_state(state),
+            extract_run_inputs(state).inputs)
+        registry = build_run_registry(merged, run_id="production")
+        metric = registry.get("price_to_book")
+        assert metric.is_usable is True
+        assert float(metric.value) == pytest.approx(1.6811, abs=1e-3)
+
+
+# ===========================================================================
+# Provenance refusals (FIX #2 B)
+# ===========================================================================
+class TestProvenanceRefusals:
+    def _registry(self, price, provenance):
+        return build_run_registry(
+            RunInputs(price=price, book_value_per_share=BVPS,
+                      price_provenance=provenance), run_id="refuse")
+
+    def test_t3_a_bare_dict_close_cannot_price_a_multiple(self):
+        """The reviewer's case: `{"close": 522.97}` with no validation."""
+        from tradingagents.dataflows.math.price_source import price_from_snapshot
+
+        provenance = price_from_snapshot({"close": 522.97})
+        registry = self._registry(522.97, provenance)
         assert registry.get("price_to_book").is_usable is False
+
+    def test_t4_a_price_without_provenance_is_not_certified(self):
+        """On the state path an absent provenance is a refusal, not a quote."""
+        from tradingagents.dataflows.math.run_registry import (
+            registry_inputs_from_state,
+        )
+
+        inputs = registry_inputs_from_state(
+            {"verified_market_snapshot": {"close": 522.97}})
+        # The snapshot path builds a provenance with status None → refused.
+        registry = build_run_registry(inputs, run_id="no-prov")
+        assert registry.get("price_to_book").is_usable is False
+
+    def test_t5_an_intraday_price_without_a_timestamp_is_refused(self):
+        """An unstamped intraday print cannot be told from a stale quote."""
+        provenance = qualified_price(
+            "BRK-B", INTRADAY_PRICE, bar_finality="INTRADAY_PARTIAL")
+        assert provenance["validation_status"] == "UNVERIFIED"
+        registry = self._registry(INTRADAY_PRICE, provenance)
+        assert registry.get("price_to_book").is_usable is False
+
+    def test_t5b_the_same_price_with_a_timestamp_is_certified(self):
+        provenance = qualified_price(
+            "BRK-B", INTRADAY_PRICE, bar_finality="INTRADAY_PARTIAL",
+            observation_timestamp="2026-11-10T16:00:00Z")
+        assert provenance["validation_status"] == "VERIFIED"
+        registry = self._registry(INTRADAY_PRICE, provenance)
+        assert registry.get("price_to_book").is_usable is True
+
+    def test_t6_the_two_qualified_kinds_produce_distinct_multiples(self):
+        intraday = self._registry(INTRADAY_PRICE, qualified_price(
+            "BRK-B", INTRADAY_PRICE, bar_finality="INTRADAY_PARTIAL",
+            observation_timestamp="2026-11-10T16:00:00Z"))
+        eod = self._registry(EOD_CLOSE, qualified_price(
+            "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED",
+            session_date="2026-11-09"))
+        assert intraday.get("price_to_book").is_usable is True
+        assert eod.get("price_to_book").is_usable is True
+        assert float(intraday.get("price_to_book").value) != pytest.approx(
+            float(eod.get("price_to_book").value), abs=1e-4)
+
+    def test_t7_an_unverified_bvps_does_not_certify_a_pb(self):
+        inputs = RunInputs(
+            price=EOD_CLOSE, book_value_per_share=BVPS,
+            claimed_inputs=("book_value_per_share",),
+            price_provenance=qualified_price(
+                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED"))
+        registry = build_run_registry(inputs, run_id="bvps-claim")
+        assert registry.get("price_to_book").is_usable is False
+
+    def test_t8_the_aggregate_needs_a_qualified_price(self):
+        inputs = RunInputs(
+            price=SMA50, market_cap_reported=1_231_440_000_000.0,
+            equity=761_368_000_000.0,
+            price_provenance={"kind": "indicator",
+                              "validation_status": "NOT_A_PRICE"})
+        registry = build_run_registry(inputs, run_id="agg")
+        assert registry.get("pb_aggregate").is_usable is False
+
+
+# ===========================================================================
+# Italian decimal separators in the claims validator (FIX #2 D)
+# ===========================================================================
+class TestItalianMultiples:
+    @pytest.mark.parametrize("text,expected", [
+        ("P/B 1,49x", 1.49),
+        ("P/B 1,64x", 1.64),
+        ("P/B of 1.49x", 1.49),
+    ])
+    def test_the_separator_forms_parse_to_a_multiple(self, text, expected):
+        from tradingagents.dataflows.math.claims import extract_claims
+
+        claims = extract_claims(text, agent="fundamentals")
+        assert len(claims) == 1, f"not parsed: {text!r}"
+        assert float(claims[0].value) == pytest.approx(expected, abs=1e-9)
+
+    def test_a_correct_italian_multiple_is_not_a_mismatch(self):
+        from tradingagents.dataflows.math.report_validation import (
+            validate_analyst_report,
+        )
+
+        registry = build_run_registry(RunInputs(
+            price=INTRADAY_PRICE, book_value_per_share=BVPS,
+            price_provenance=qualified_price(
+                "BRK-B", INTRADAY_PRICE, bar_finality="INTRADAY_PARTIAL",
+                observation_timestamp="2026-11-10T16:00:00Z")),
+            run_id="it-ok")
+        validation = validate_analyst_report(
+            "P/B 1,64x", agent="fundamentals", registry=registry)
+        assert validation.blocks_decision is False
+
+    def test_a_wrong_italian_multiple_is_a_mismatch(self):
+        from tradingagents.dataflows.math.report_validation import (
+            validate_analyst_report,
+        )
+
+        registry = build_run_registry(RunInputs(
+            price=INTRADAY_PRICE, book_value_per_share=BVPS,
+            price_provenance=qualified_price(
+                "BRK-B", INTRADAY_PRICE, bar_finality="INTRADAY_PARTIAL",
+                observation_timestamp="2026-11-10T16:00:00Z")),
+            run_id="it-bad")
+        validation = validate_analyst_report(
+            "P/B 1,49x", agent="fundamentals", registry=registry)
+        assert validation.blocks_decision is True

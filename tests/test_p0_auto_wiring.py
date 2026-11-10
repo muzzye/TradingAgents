@@ -76,8 +76,16 @@ def _state(fundamentals_report="", rating="Hold"):
         # freshness gate, not the authorisation rule, so a certified metric is
         # supplied to keep the run otherwise approvable (§4: no certified
         # metric means no order, which would mask what is under test here).
-        "verified_market_snapshot": {"close": 570.89, "sma200": 497.723,
-                                     "previous_close": 572.33},
+        "verified_market_snapshot": {
+            "close": 570.89, "sma200": 497.723, "previous_close": 572.33,
+            "currency": "USD",
+            "price_provenance": {
+                "kind": "eod_close", "value": 570.89, "currency": "USD",
+                "share_class": "B", "timestamp": "2026-11-06T21:00:00Z",
+                "session_date": "2026-11-06", "source": "yfinance",
+                "bar_finality": "EOD_CONFIRMED",
+                "validation_status": "VERIFIED"},
+        },
     }
 
 

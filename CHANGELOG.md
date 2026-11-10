@@ -19,6 +19,31 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.16] — 2026-11-10
+
+### Fixed
+
+- **The production path now supplies a qualified price and the accounting
+  denominator.** Declaring `verified_market_snapshot` on `AgentState` was not
+  enough: nothing populated it, so in a real run the P/B was still
+  `NOT_COMPUTABLE` while the report quoted a multiple. The Data Quality Check
+  node now reads the latest verified OHLCV row and the SEC filing, publishes a
+  price with its provenance (symbol, class, value, currency, timestamp, session
+  date, source, bar finality, kind, validation status) and the accounting facts
+  (attributable equity, both share counts, the conversion ratio, the period
+  end and the derived book value per share). New
+  `dataflows/fundamentals/sec_accounting.py` does the filing side.
+- **An intraday price without a timestamp is not verified.** A print with no
+  observation time cannot be distinguished from a stale quote, so
+  `qualified_price()` marks it `UNVERIFIED` and the registry refuses the
+  multiple.
+- **`P/B 1,49x` parses as 1.49.** The claims validator stripped every comma as
+  a thousands separator, so an Italian decimal multiple read as 149 — a correct
+  figure became a mismatch. A comma followed by one or two digits is now a
+  decimal, the rule `math/precision` already documents for other figures.
+- **`price_to_book` records the book value's period,** so the certified table
+  shows when the figure is as of rather than a dash.
+
 ## [0.8.15] — 2026-11-10
 
 ### Fixed

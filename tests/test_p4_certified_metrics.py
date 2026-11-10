@@ -230,7 +230,8 @@ class TestPipelinePropagation:
         graph = _graph(tmp_path)
         state = _state("P/B of 1.6040x.")
         state["verified_market_snapshot"] = {"close": 576.74, "sma200": 502.85,
-                                             "previous_close": 570.89}
+                                             "previous_close": 570.89,
+                                             "price_provenance": {"kind": "intraday", "value": 576.74, "currency": "USD", "share_class": "B", "timestamp": "2026-11-09T17:37:00Z", "session_date": "2026-11-09", "source": "yfinance", "bar_finality": "INTRADAY_PARTIAL", "validation_status": "VERIFIED"}}
         graph.record_decision("BRK-B", "2026-11-09", state)
 
         # The Portfolio Manager is the last node; its state is what this is.
@@ -257,7 +258,8 @@ class TestPipelinePropagation:
         graph = _graph(tmp_path)
         state = _state("P/B of 1.6040x.")
         state["verified_market_snapshot"] = {"close": 576.74, "sma200": 502.85,
-                                             "previous_close": 570.89}
+                                             "previous_close": 570.89,
+                                             "price_provenance": {"kind": "intraday", "value": 576.74, "currency": "USD", "share_class": "B", "timestamp": "2026-11-09T17:37:00Z", "session_date": "2026-11-09", "source": "yfinance", "bar_finality": "INTRADAY_PARTIAL", "validation_status": "VERIFIED"}}
         graph.record_decision("BRK-B", "2026-11-09", state)
 
         report = write_report_tree(state, "BRK-B", tmp_path / "report",

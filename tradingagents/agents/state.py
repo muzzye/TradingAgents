@@ -83,6 +83,15 @@ class AgentState(MessagesState):
     # out NOT_COMPUTABLE while the report still quoted a multiple (FIX #2).
     verified_market_snapshot: Annotated[dict, "The market snapshot the analyst read: latest OHLCV row, indicators, price provenance and bar finality"]
 
+    # Accounting denominators from SEC filings (equity attributable, share counts,
+    # ratio and period end). Declared so the pricing path stays certified.
+    equity: Annotated[float | None, "Shareholders' equity from the filing"]
+    equity_period_end: Annotated[str | None, "Period end of the equity figure (e.g., 2026-09-30)"]
+    shares_class_a: Annotated[float | None, "Class A share count"]
+    shares_class_b: Annotated[float | None, "Class B share count"]
+    class_a_to_b_ratio: Annotated[float | None, "Verified conversion ratio from A to B"]
+    book_value_per_share: Annotated[float | None, "Book value per share, basis match with price class"]
+
     revenue_consolidated: Annotated[float, "Consolidated revenue the filing states, in base units, as of the period end below"]
     revenue_prior: Annotated[float, "The same quarter a year earlier, when the filing reports it"]
     revenue_provenance: Annotated[dict, "Where revenue_consolidated came from: concept, CIK, accession, period, unit, scale, validation status"]

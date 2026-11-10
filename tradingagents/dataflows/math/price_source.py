@@ -47,7 +47,11 @@ def qualified_price(
     if finality == "EOD_CONFIRMED":
         kind, status = "eod_close", "VERIFIED"
     elif finality == "INTRADAY_PARTIAL":
-        kind, status = "intraday", "VERIFIED"
+        # An intraday price is only usable with the moment it was observed:
+        # without a stamp there is no way to tell a mid-session print from a
+        # stale quote, so it is not verified.
+        kind = "intraday"
+        status = "VERIFIED" if observation_timestamp else "UNVERIFIED"
     else:
         kind, status = "unqualified", "UNVERIFIED"
 
@@ -98,7 +102,7 @@ def price_from_snapshot(snapshot: dict | None, symbol: str = "",
         "session_date": snapshot.get("session_date"),
         "source": snapshot.get("source") or "verified_market_snapshot",
         "bar_finality": snapshot.get("bar_finality"),
-        "validation_status": "VERIFIED",
+        "validation_status": snapshot.get("validation_status"),
     }
 
 

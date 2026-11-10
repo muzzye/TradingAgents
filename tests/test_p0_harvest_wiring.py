@@ -86,7 +86,7 @@ class TestRegistryWiring:
             # A snapshot the engine can certify from, so these tests measure
             # the harvest wiring rather than the authorisation rule (§4: no
             # certified metric means no order).
-            "verified_market_snapshot": {"close": 570.89, "sma200": 497.723},
+            "verified_market_snapshot": {"close": 570.89, "sma200": 497.723, "price_provenance": {"kind": "intraday", "value": 570.89, "currency": "USD", "share_class": "B", "timestamp": "2026-11-07T17:37:00Z", "session_date": "2026-11-07", "source": "yfinance", "bar_finality": "INTRADAY_PARTIAL", "validation_status": "VERIFIED"}},
         }
         state.update(reports)
         return state

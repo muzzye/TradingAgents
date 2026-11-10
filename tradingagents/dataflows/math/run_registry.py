@@ -132,15 +132,19 @@ def price_is_qualified(inputs: RunInputs) -> bool:
     if inputs.price is None:
         return False
     provenance = inputs.price_provenance
-    if not isinstance(provenance, dict):
+    if provenance is None:
+        # No provenance at all: a caller constructing RunInputs directly (the
+        # math tests do) means "a price". The state path always supplies one, so
+        # production cannot reach this branch by accident.
         return True
+    if not isinstance(provenance, dict):
+        return False
 
     kind = str(provenance.get("kind") or "").lower()
     status = str(provenance.get("validation_status") or "").upper()
-    if kind in _NON_PRICE_KINDS or status in ("NOT_A_PRICE", "UNVERIFIED"):
+    if kind not in MARKET_PRICE_KINDS:
         return False
-    return not (provenance.get("kind")
-                and kind not in MARKET_PRICE_KINDS)
+    return status == "VERIFIED"
 
 
 def _register_if_computable(registry: MetricRegistry, name: str,
@@ -459,6 +463,10 @@ def _register_dual_class_valuation(registry: MetricRegistry,
         source_status=_source_of(inputs, "price", "book_value_per_share",
                                  "equity", "shares_class_a",
                                  "shares_class_b", "class_a_to_b_ratio"),
+        # The multiple is as of the book value's period: the price is an
+        # instant and the equity is a quarter, and the quarter is what dates
+        # the figure.
+        period_end=inputs.equity_period_end,
     )
 
     _register_pb_aggregate(registry, inputs, b_equivalent,
@@ -652,8 +660,8 @@ def registry_inputs_from_state(state: dict) -> RunInputs:
     return RunInputs(
         price=_num(snapshot.get("close"), snapshot.get("price")),
         # FIX #2: what kind of number that is. A snapshot built by
-        # `price_source.qualified_price` states it; a bare close is taken as a
-        # real quote, which is what every caller before FIX #2 meant.
+        # `price_source.qualified_price` states it; a bare close lacking any
+        # validation_status is not qualified.
         price_provenance=_price_provenance_from(snapshot),
         previous_close=_num(snapshot.get("previous_close")),
         sma50=_num(snapshot.get("sma50")),

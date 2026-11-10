@@ -339,7 +339,17 @@ class TestRealGraphPath:
 class TestRegistryInputsFromState:
     def test_values_are_read_from_the_snapshot_only(self):
         inputs = registry_inputs_from_state({
-            "verified_market_snapshot": {"close": 576.74, "sma50": 557.9},
+            "verified_market_snapshot": {
+                "close": 576.74, "sma50": 557.9, "currency": "USD",
+                "price_provenance": {
+                    "kind": "intraday", "value": 576.74,
+                    "currency": "USD", "share_class": "B",
+                    "timestamp": "2026-11-09T17:37:00Z",
+                    "session_date": "2026-11-09",
+                    "source": "yfinance",
+                    "bar_finality": "INTRADAY_PARTIAL",
+                    "validation_status": "VERIFIED"},
+            },
         })
         assert inputs.price == pytest.approx(576.74)
         assert inputs.sma50 == pytest.approx(557.9)

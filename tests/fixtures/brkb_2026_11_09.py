@@ -266,6 +266,13 @@ class BrkbFixture:
         ]
 
     def market_snapshot(self) -> dict:
+        """The snapshot a run reads, with the price's provenance (FIX #2).
+
+        The provenance is what tells the engine this is a live quote rather
+        than a moving average. Without it the registry refuses to price any
+        multiple — the 2026-11-10 defect, where a P/B was computed from the
+        SMA50 because nothing recorded what the numerator was.
+        """
         return {
             "close": self.price,
             "previous_close": self.previous_close,
@@ -277,6 +284,20 @@ class BrkbFixture:
             # other key is silently ignored, and the audit then reports no bar
             # verdict at all — which reads exactly like "no bar was used".
             "price_as_of": self.snapshot_instant,
+            # FIX #2: the snapshot instant is midday New York, so the bar is
+            # provisional — an intraday price, never a close.
+            "price_provenance": {
+                "symbol": self.ticker,
+                "value": self.price,
+                "currency": "USD",
+                "share_class": "B",
+                "kind": "intraday",
+                "timestamp": self.snapshot_instant,
+                "session_date": self.analysis_date,
+                "source": "yfinance",
+                "bar_finality": "INTRADAY_PARTIAL",
+                "validation_status": "VERIFIED",
+            },
         }
 
     def portfolio(self) -> dict:

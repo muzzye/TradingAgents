@@ -25,7 +25,8 @@ from tradingagents.dataflows.filing_freshness import used_period_end_from_report
 logger = logging.getLogger(__name__)
 
 
-def create_data_quality_check(filings_provider=None, sec_facts_provider=None):
+def create_data_quality_check(filings_provider=None, sec_facts_provider=None,
+                              price_provider=None):
     """Build the node. ``filings_provider`` is injectable for tests.
 
     The default provider reads the filings known at the trade date from SEC
@@ -69,6 +70,38 @@ def create_data_quality_check(filings_provider=None, sec_facts_provider=None):
                           [f["code"] for f in sec_reconciliation["findings"]
                            if f.get("blocks")] or ()) if sec_blocks else ()
 
+        # FIX #2: publish the qualified market price and the accounting
+        # inputs from SEC filings, so the P/B is computed from a verified
+        # numerator and denominator rather than from prose.
+        from tradingagents.dataflows.fundamentals import extract_sec_accounting
+
+        accounting = None
+        if sec_facts_provider is not None:
+            try:
+                payload = sec_facts_provider(ticker, trade_date)
+                if isinstance(payload, dict):
+                    accounting = extract_sec_accounting(
+                        payload,
+                        cik=(payload.get("cik")
+                             or payload.get("facts", {}).get("cik")
+                             or payload.get("cik_str")),
+                    )
+                    if accounting.validation_status != "VERIFIED":
+                        logger.warning(
+                            "SEC accounting is UNVERIFIED for %s (%s)",
+                            ticker, accounting.rejection_reason,
+                        )
+            except Exception:  # noqa: BLE001 — provider unavailable is not tolerated
+                logger.exception(
+                    "SEC accounting extraction failed for %s", ticker)
+
+        # FIX #2 (A): the qualified price, from the market provider — never
+        # from the model's prose. `price_provider` is injectable so a test can
+        # supply a frozen bar; the default reads the same OHLCV the analyst's
+        # snapshot tool reads, and classifies the bar's finality.
+        market_price = _qualified_price_from_provider(
+            price_provider, ticker, trade_date)
+
         # FIX #1: the consolidated revenue the filing states, as structured
         # inputs for the registry. Without this the metric was populated only by
         # a regex over the analyst's prose, so a correctly filed figure came out
@@ -100,9 +133,96 @@ def create_data_quality_check(filings_provider=None, sec_facts_provider=None):
             update["revenue_provenance"] = revenue_inputs.revenue_provenance
             if revenue_inputs.revenue_prior is not None:
                 update["revenue_prior"] = revenue_inputs.revenue_prior
+
+        if accounting is not None:
+            for field_name, value in (
+                ("equity", accounting.equity),
+                ("equity_period_end", accounting.equity_period_end),
+                ("shares_class_a", accounting.shares_class_a),
+                ("shares_class_b", accounting.shares_class_b),
+                ("class_a_to_b_ratio", accounting.class_a_to_b_ratio),
+                ("book_value_per_share", accounting.book_value_per_share),
+            ):
+                if value is not None:
+                    update[field_name] = value
+
+        if market_price is not None:
+            update["verified_market_snapshot"] = {
+                "close": market_price["value"],
+                "price": market_price["value"],
+                "currency": market_price.get("currency"),
+                "price_provenance": market_price,
+            }
+
         return update
 
     return data_quality_check_node
+
+
+def _qualified_price_from_provider(provider, ticker: str, trade_date: str):
+    """A qualified market price for ``ticker`` as of ``trade_date``.
+
+    The provider returns a dict with the bar's close and its finality; the
+    default reads the same verified OHLCV the analyst's snapshot tool reads.
+    Nothing here parses prose: a price that cannot be sourced stays absent and
+    the P/B is then NOT_COMPUTABLE, which is the honest answer.
+    """
+    from tradingagents.dataflows.math.price_source import qualified_price
+
+    try:
+        if provider is not None:
+            bar = provider(ticker, trade_date)
+        else:
+            bar = _default_bar(ticker, trade_date)
+        if not isinstance(bar, dict):
+            return None
+        price = bar.get("close")
+        if price is None:
+            price = bar.get("price")
+        if price is None:
+            return None
+        return qualified_price(
+            ticker, float(price),
+            bar_finality=bar.get("bar_finality") or bar.get("finality"),
+            session_date=bar.get("session_date"),
+            observation_timestamp=bar.get("timestamp")
+            or bar.get("observation_timestamp"),
+            source=bar.get("source") or "yfinance",
+            currency=bar.get("currency"),
+            share_class=bar.get("share_class"),
+        )
+    except Exception:  # noqa: BLE001 — an unavailable price is not a pass
+        logger.debug("Could not build a qualified price for %s", ticker,
+                     exc_info=True)
+        return None
+
+
+def _default_bar(ticker: str, trade_date: str) -> dict | None:
+    """The latest verified OHLCV row, with the bar's finality.
+
+    Reads through `snapshot._verified_rows`, the same point-in-time path the
+    analyst's snapshot tool uses, so the price the engine certifies and the
+    price the analyst reads come from one source.
+    """
+    from datetime import UTC, datetime
+
+    from tradingagents.dataflows.vendors.bar_finality import assess_finality
+    from tradingagents.dataflows.vendors.yahoo.snapshot import _verified_rows
+
+    rows = _verified_rows(ticker, trade_date)
+    if rows is None or rows.empty:
+        return None
+    latest = rows.iloc[-1]
+    session_date = str(latest["Date"])[:10]
+    finality = assess_finality(
+        datetime.now(UTC).isoformat(), session_date=session_date)
+    return {
+        "close": float(latest["Close"]),
+        "session_date": session_date,
+        "bar_finality": str(finality.finality),
+        "timestamp": finality.observation_timestamp,
+        "source": "yfinance",
+    }
 
 
 def _reconcile_sec_concepts(provider, ticker: str, trade_date: str,
