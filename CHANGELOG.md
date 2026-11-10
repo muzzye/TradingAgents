@@ -19,6 +19,29 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.25] — 2026-11-10
+
+### Fixed
+
+- **A qualifier written *after* the figure now applies to it.** The scope
+  stopped at the end of the number, so `P/E 18.2x (forward)`,
+  `P/E 18.2x (FY2024)` and `P/E 18,2x — storico` were all read as current
+  trailing claims. Against `pe_trailing = 25.4` each produced a **false
+  MISMATCH** on a sentence that said nothing wrong, and blocked an order for it.
+
+  The scope now extends on both sides, bounded by the clause separator rather
+  than by a character radius. A radius cannot work: `(forward) and P/E 25.4x
+  (trailing)` puts 13 characters between the two figures, so any radius reaching
+  `(trailing)` also reaches `(forward)`. Separators — comma, semicolon,
+  parenthesis, sentence end, `and`/`while`/`but`/`e`/`ma` — are where prose
+  stops qualifying one figure and starts qualifying the next. A decimal point is
+  not a separator; it counts only when it is not between two digits.
+
+- Removed `_pe_sentence()`, `_pe_other_claim_spans()`, `_PE_SENTENCE_BREAK` and
+  `_PE_LABEL_PATTERNS`, left unused by the previous correction. The neighbour
+  lookup they performed is now done by the clause boundary, so keeping them
+  would have been dead code pretending to enforce something.
+
 ## [0.8.24] — 2026-11-10
 
 ### Fixed

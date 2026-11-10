@@ -261,9 +261,6 @@ _PE_PER_PATTERN = re.compile(
     r"[^.\d\n%]{0,30}?(\d+(?:[.,]\d+)?)\s*x?",
     re.IGNORECASE)
 
-# Every pattern that can denote a P/E figure, for neighbour detection.
-_PE_LABEL_PATTERNS = (_PE_LABEL_PATTERN, _PE_PER_PATTERN)
-
 _CLAIM_PATTERNS: tuple[tuple[str, re.Pattern[str], str, int], ...] = (
     # Reports write this both ways round — "11.3% below the high" and
     # "-2.63% from the high" — so both orders are matched.
@@ -345,74 +342,52 @@ _PE_HISTORICAL = re.compile(
 
 # A sentence boundary is a period/newline/semicolon **not** sitting between two
 # digits. `.` inside `25.4` is a decimal point, not a full stop: stopping there
-# truncated the figure to `25` and, worse, split one sentence into fragments that
-# the qualifier check then judged independently.
-_PE_SENTENCE_BREAK = re.compile(r"(?<![\d])[.\n;](?![\d])")
+# Where a qualifier stops describing a figure: a clause separator. A decimal
+# point is not one, so `\.` only counts when it is not between two digits.
+_PE_QUALIFIER_STOP = re.compile(
+    r"[;,\n]|(?<![\d])\.(?![\d])|\b(?:and|while|but|whereas|e|ma)\b",
+    re.IGNORECASE)
 
-# How far from a figure a qualifier may sit and still describe it. A multiple's
-# qualifier is adjacent ("Forward P/E of 18.2x"); a whole separate clause away it
-# belongs to another figure. Chosen over a word distance because the qualifier may
-# be a label ("P/E forward") or a prefix ("FY2024 P/E") at either side.
-_PE_LEADING_QUALIFIER_REACH = 16
-
-
-def _pe_sentence(text: str, start: int, end: int) -> tuple[int, int]:
-    """Bounds of the sentence fragment containing a P/E match."""
-    left = 0
-    for boundary in _PE_SENTENCE_BREAK.finditer(text, 0, start):
-        left = boundary.end()
-    match = _PE_SENTENCE_BREAK.search(text, end)
-    right = match.start() if match else len(text)
-    return left, right
-
-
-def _pe_other_claim_spans(text: str, start: int, end: int) -> list[tuple[int, int]]:
-    """Spans of the *other* P/E figures in the same sentence.
-
-    A qualifier is attributed to the nearest P/E, so a neighbour's span is a wall
-    the qualifier's reach cannot cross. Without it, "Trailing P/E 18.2x and
-    Forward P/E 25.4x" excluded the first figure because of the second's
-    `Forward` — the defect this function exists to prevent.
-    """
-    spans = []
-    for pattern in _PE_LABEL_PATTERNS:
-        for other in pattern.finditer(text):
-            if other.start() == start and other.end() == end:
-                continue
-            if other.end() <= start or other.start() >= end:
-                spans.append((other.start(), other.end()))
-    return spans
+# A qualifier is short: "Forward", "(FY2024)", "— storico". These caps are a
+# backstop for prose with no punctuation at all, not the primary boundary.
+_PE_PREFIX_CAP = 20
+_PE_SUFFIX_CAP = 24
 
 
 def _pe_qualifier_scope(text: str, start: int, end: int) -> str:
-    """The text that may qualify *this* figure.
+    """The text that may qualify *this* figure, on either side of it.
 
-    Not the whole sentence: that is what let a neighbour's `Forward` silence a
-    correct trailing claim. Nor a fixed distance: `Trailing P/E 18.2x and
-    Forward P/E 25.4x` has 13 characters between the two figures, and any window
-    wide enough to catch `Price-to-Earnings ratio of 25.4` would swallow the
-    neighbour too.
+    A qualifier describes a figure from either side, but only within the same
+    clause:
 
-    A qualifier describes a figure from either side but only *adjacent* to it:
-    it sits between the label and the number ("P/E forward 18,2") or immediately
-    before the label ("Forward P/E of 18.2"). Both are captured by taking the
-    text from the label's start — extended backwards by a short span for a
-    leading qualifier — up to the figure.
+    - before the label: "Forward P/E of 18.2", "FY2024 P/E 12x";
+    - between label and number: "P/E forward 18,2";
+    - after the number, bracketed or dashed: "P/E 18.2x (forward)",
+      "P/E 18,2x — storico".
+
+    The trailing side was missing from an earlier version, which read
+    `P/E 18.2x (forward)` as a trailing claim and produced a false MISMATCH.
+
+    The boundary is the clause separator, not a character radius. A radius
+    cannot work: `(forward) and P/E 25.4x (trailing)` puts 13 characters between
+    the two figures, so any radius reaching `(trailing)` also reaches
+    `(forward)`. Separators end a qualifier because that is where prose stops
+    qualifying this figure and starts qualifying the next one.
     """
-    label_start = start
-    while label_start > 0 and text[label_start - 1].isalnum():
-        label_start -= 1
-    # Backwards only as far as a leading qualifier can reach: one word plus a
-    # space ("Forward P/E", "FY2024 P/E"). A longer reach crosses into the
-    # previous clause and picks up its qualifier.
-    scope_start = max(0, label_start - _PE_LEADING_QUALIFIER_REACH)
-    head = text[scope_start:label_start]
-    if head and not head[-1].isspace():
-        # Cut mid-word: drop the partial token so a fragment of the previous
-        # figure's text cannot be read as this one's qualifier.
-        cut = len(head) - head[::-1].find(" ") if " " in head else 0
-        scope_start += cut if cut else len(head)
-    return text[scope_start:end]
+    prefix_start = 0
+    for separator in _PE_QUALIFIER_STOP.finditer(text, 0, start):
+        prefix_start = separator.end()
+    # A closing bracket also ends the previous figure's qualifier.
+    closing = text.rfind(")", prefix_start, start)
+    if closing != -1:
+        prefix_start = closing + 1
+    prefix_start = max(prefix_start, start - _PE_PREFIX_CAP)
+
+    separator = _PE_QUALIFIER_STOP.search(text, end)
+    suffix_end = separator.start() if separator else len(text)
+    suffix_end = min(suffix_end, end + _PE_SUFFIX_CAP)
+
+    return text[prefix_start:suffix_end]
 
 
 def _pe_claim_value(text: str, match: re.Match[str]) -> str | None:

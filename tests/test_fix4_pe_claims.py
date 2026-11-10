@@ -444,3 +444,64 @@ def _gate_with(text, registry=None):
         metric_registry=registry if registry is not None else _registry(),
         trigger_met=True, equity=100_000.0, cash=50_000.0,
         risk_budget=1000.0, max_symbol_exposure=0.05)
+
+
+class TestQualifiersAfterTheFigure:
+    """A qualifier in parentheses or after a dash belongs to the figure before it.
+
+    `_pe_qualifier_scope()` stopped at the end of the number, so
+    `P/E 18.2x (forward)` was read as a trailing claim. Against
+    `pe_trailing = 25.4` that produced a **false MISMATCH** on a correct
+    sentence — the failure mode T5 forbids.
+    """
+
+    def _trailing(self, text):
+        return [str(c.value) for c in extract_claims(text, "f")
+                if c.label == "pe_trailing"]
+
+    def test_a_a_forward_qualifier_after_the_value(self):
+        assert self._trailing("P/E 18.2x (forward)") == []
+
+    def test_a_forward_qualifier_with_italian_parentheses(self):
+        assert self._trailing("P/E 18,2x (atteso)") == []
+
+    def test_b_a_fiscal_year_after_the_value(self):
+        assert self._trailing("P/E 18.2x (FY2024)") == []
+
+    def test_c_a_historical_dash_qualifier(self):
+        assert self._trailing("P/E 18,2x — storico") == []
+
+    def test_c_a_historical_dash_qualifier_in_english(self):
+        assert self._trailing("P/E 18.2x — historical") == []
+
+    def test_h_a_trailing_qualifier_after_the_value_is_kept(self):
+        """The positive case: an explicit `(trailing)` must still be read."""
+        assert self._trailing("P/E 25.4x (trailing)") == ["25.4"]
+
+    def test_g_the_next_sentence_does_not_reclassify(self):
+        """`Forward outlook remains positive` is a different sentence."""
+        assert self._trailing(
+            "P/E 25.4x. Forward outlook remains positive") == ["25.4"]
+
+    def test_a_neighbour_figure_keeps_its_own_trailing_qualifier(self):
+        """The trailing figure that follows a forward one is still read."""
+        assert self._trailing(
+            "P/E 18.2x (forward) and P/E 25.4x (trailing)") == ["25.4"]
+
+    def test_a_decimal_is_not_a_sentence_boundary_here_either(self):
+        assert self._trailing("P/E 25.43x (trailing)") == ["25.43"]
+
+
+class TestPostValueQualifierThroughTheGate:
+    def test_a_a_forward_figure_after_the_value_does_not_block(self):
+        record, decision = _gate_with("P/E 18.2x (forward)")
+        codes = [f.code for f in record.math_verdict.report.findings]
+        assert "NUMERIC_CLAIM_MISMATCH" not in codes
+        assert decision.creates_order is True, (
+            "a forward multiple must not block a run whose trailing claim is absent")
+
+    def test_h_a_trailing_figure_after_the_value_still_blocks_when_wrong(self):
+        record, decision = _gate_with("P/E 18.2x (trailing)")
+        assert decision.creates_order is False
+        codes = [f.code for f in record.math_verdict.report.findings]
+        assert "NUMERIC_CLAIM_MISMATCH" in codes
