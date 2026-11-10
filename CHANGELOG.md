@@ -19,6 +19,30 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.10] — 2026-11-10
+
+### Fixed
+
+- **A report that contradicts the certified revenue is now recorded.** Runtime
+  verification of 0.8.9 found requirement #7 unmet: when the Fundamentals
+  Analyst stated a consolidated revenue different from the filing's, the
+  registry kept the filing's value — correctly — and the disagreement was
+  recorded nowhere, so a reader could not tell agreement from contradiction.
+  New `dataflows/sec_claim_reconciliation.py` compares the certified
+  `consolidated_revenue` against explicit level claims in the analysts' reports
+  and returns a structured `SEC_REVENUE_CLAIM_MISMATCH` finding carrying the
+  filing's value, the claimed value, the period, the unit, the agent, the
+  accession and the severity. The gate runs it where both the registry and the
+  reports exist — the Data Quality node cannot, because it executes in parallel
+  with the analysts and the fundamentals report is still empty.
+  The certified `MetricRecord` is never modified: the finding sits beside it,
+  and an unresolved contradiction blocks a dependent order while the diagnostic
+  report stays available.
+  Four rules keep it from firing on non-contradictions: a rate is not a level
+  claim, a figure labelled contract or segment revenue is a different quantity,
+  a figure introduced as a prior period is context, and no certified metric
+  means no comparison.
+
 ## [0.8.9] — 2026-11-10
 
 ### Fixed

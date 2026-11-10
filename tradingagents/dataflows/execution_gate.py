@@ -75,6 +75,10 @@ class GateReason(StrEnum):
     # specifically a claimed rate (growth, contraction, distance) that the
     # registry disproves.
     NUMERIC_CLAIM_MISMATCH = "NUMERIC_CLAIM_MISMATCH"
+    # §FIX #1.1: a report states a consolidated revenue the filing contradicts.
+    # Distinct from NUMERIC_CLAIM_MISMATCH, which covers a rate: this names a
+    # level, and the filing is the authority for it.
+    SEC_REVENUE_CLAIM_MISMATCH = "SEC_REVENUE_CLAIM_MISMATCH"
     # §4: an executable decision must rest on at least one certified metric.
     # Distinct from the claim codes: this says nothing was certified at all,
     # rather than that a particular figure was wrong.
