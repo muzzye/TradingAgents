@@ -19,6 +19,29 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.26] — 2026-11-10
+
+### Fixed
+
+- **A full stop after a decimal now ends the sentence instead of swallowing
+  the next one.** `_PE_QUALIFIER_STOP` was written as
+  `(?<![\d])\.(?![\d])`, which refuses to match a period *preceded* by a digit.
+  The condition was backwards: a period is a decimal point only when it sits
+  **between two digits**, so `P/E 25.4. Forward outlook remains positive` had no
+  boundary after the number. The following sentence's `Forward` then entered the
+  qualifier scope and excluded a correct claim — silently, so a wrong trailing
+  figure in that position also escaped the check.
+
+- **The Italian conjunctions no longer match inside `P/E`.** `\be\b` matched the
+  `E` of the label, so every prefix was cut at the second character and the
+  qualifier check was effectively disabled for claims written without a space
+  before the slash. `e` and `ma` now require a space on both sides.
+
+### Unchanged
+
+- The Italian comma decimal still reads correctly: `P/E 18,2. Forward outlook...`
+  parses as `18.2`, and the period after it separates the sentences.
+
 ## [0.8.25] — 2026-11-10
 
 ### Fixed

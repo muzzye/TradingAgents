@@ -505,3 +505,61 @@ class TestPostValueQualifierThroughTheGate:
         assert decision.creates_order is False
         codes = [f.code for f in record.math_verdict.report.findings]
         assert "NUMERIC_CLAIM_MISMATCH" in codes
+
+
+class TestDecimalPointVersusSentenceEnd:
+    """A `.` after a figure ends the sentence unless it is a decimal point.
+
+    `_PE_QUALIFIER_STOP` used `(?<![\\d])\\.(?![\\d])`, which refuses to match a
+    period preceded by a digit — so `P/E 25.4. Forward outlook...` had no stop
+    after the number at all, and `Forward` from the *next sentence* entered the
+    scope and excluded a correct claim.
+
+    A period is a decimal point only when it sits between two digits. Requiring
+    a non-digit *before* it had the rule backwards.
+    """
+
+    def _trailing(self, text):
+        return [str(c.value) for c in extract_claims(text, "f")
+                if c.label == "pe_trailing"]
+
+    def test_a_a_period_after_a_decimal_ends_the_sentence(self):
+        assert self._trailing(
+            "P/E 25.4. Forward outlook remains positive") == ["25.4"]
+
+    def test_b_a_period_after_a_decimal_does_not_hide_a_wrong_figure(self):
+        assert self._trailing(
+            "P/E 18.2. Forward outlook remains positive") == ["18.2"]
+
+    def test_c_the_x_suffix_form_still_works(self):
+        assert self._trailing(
+            "P/E 25.4x. Forward outlook remains positive") == ["25.4"]
+
+    def test_g_italian_comma_decimal_then_period(self):
+        assert self._trailing(
+            "P/E 18,2. Forward outlook remains positive") == ["18.2"]
+
+    def test_a_decimal_point_inside_the_number_is_not_a_stop(self):
+        assert self._trailing("P/E 25.43x (trailing)") == ["25.43"]
+        assert self._trailing("P/E 25.43. Trailing per the filing") == ["25.43"]
+
+    def test_the_e_in_pe_is_not_the_italian_conjunction(self):
+        """`\\be\\b` matched the `E` of `P/E`, cutting every prefix in two."""
+        assert self._trailing("P/E 25.4x (trailing)") == ["25.4"]
+        assert self._trailing("P/E 18.2x (forward)") == []
+        assert self._trailing("P/E trailing 25,4x") == ["25.4"]
+
+
+class TestSentenceBoundaryThroughTheGate:
+    def test_b_a_period_before_forward_still_blocks_a_wrong_figure(self):
+        record, decision = _gate_with("P/E 18.2. Forward outlook remains positive")
+        assert decision.creates_order is False
+        assert decision.action.value == "BLOCK"
+        codes = [f.code for f in record.math_verdict.report.findings]
+        assert "NUMERIC_CLAIM_MISMATCH" in codes
+
+    def test_a_a_correct_figure_before_a_forward_sentence_does_not_block(self):
+        record, decision = _gate_with("P/E 25.4. Forward outlook remains positive")
+        codes = [f.code for f in record.math_verdict.report.findings]
+        assert "NUMERIC_CLAIM_MISMATCH" not in codes
+        assert decision.creates_order is True

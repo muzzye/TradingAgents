@@ -342,10 +342,21 @@ _PE_HISTORICAL = re.compile(
 
 # A sentence boundary is a period/newline/semicolon **not** sitting between two
 # digits. `.` inside `25.4` is a decimal point, not a full stop: stopping there
-# Where a qualifier stops describing a figure: a clause separator. A decimal
-# point is not one, so `\.` only counts when it is not between two digits.
+# Where a qualifier stops describing a figure: a clause separator.
+#
+# A period is a decimal point only when it sits *between two digits*, so every
+# other period ends the clause. The previous rule required a non-digit before the
+# period, which meant `P/E 25.4. Forward outlook...` had no boundary after the
+# number — the next sentence's `Forward` then entered the scope and silently
+# dropped a correct claim. Reading the condition backwards is what caused it.
+#
+# The Italian conjunctions `e`/`ma` must be surrounded by spaces: `\be\b`
+# matches the `E` of `P/E`, splitting the label itself into a prefix and
+# disabling the qualifier check on every claim.
 _PE_QUALIFIER_STOP = re.compile(
-    r"[;,\n]|(?<![\d])\.(?![\d])|\b(?:and|while|but|whereas|e|ma)\b",
+    r"[;,\n]|(?<!\d)\.|\.(?!\d)"
+    r"|\b(?:and|while|but|whereas)\b"
+    r"|(?<=\s)(?:e|ma)(?=\s)",
     re.IGNORECASE)
 
 # A qualifier is short: "Forward", "(FY2024)", "— storico". These caps are a
