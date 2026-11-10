@@ -15,6 +15,7 @@ import json
 
 import pytest
 
+from tests.fixtures import verified_price
 from tradingagents.dataflows.execution_gate import (
     ExecutionAction,
     ExecutionGate,
@@ -204,7 +205,7 @@ class TestNoOrderReachesTheBroker:
             trigger_met=True, market_open=True,
             metric_registry=build_run_registry(
                 RunInputs(price=556.0, sma200=500.0,
-                          book_value_per_share=350.0)),
+                          book_value_per_share=350.0, price_provenance=verified_price(556.0))),
         )
         _route_to_broker(record, decision, gate, broker, quantity=5)
 

@@ -784,3 +784,178 @@ class TestProductionWiring:
         assert decision.creates_order is False
         assert "SEC_REVENUE_CLAIM_MISMATCH" in [r.value for r in decision.reasons] \
             or decision.action.value == "BLOCK"
+
+
+# ===========================================================================
+# Final review — the accounting verdict reaches the registry
+# ===========================================================================
+def _coherent_filing() -> dict:
+    """Equity, both share counts and the ratio, all from one period."""
+    return {"facts": {"us-gaap": {
+        "StockholdersEquity": {"units": {"USD": [
+            {"val": 761_368_000_000, "end": "2026-09-30",
+             "start": "2026-07-01", "filed": "2026-11-09", "form": "10-Q"}]}},
+        "CommonStockClassASharesOutstanding": {"units": {"shares": [
+            {"val": 550_000, "end": "2026-09-30", "filed": "2026-11-09"}]}},
+        "CommonStockClassBSharesOutstanding": {"units": {"shares": [
+            {"val": 1_400_000_000, "end": "2026-09-30",
+             "filed": "2026-11-09"}]}},
+        "ExchangeRatioOfClassACommonStockToClassBCommonStock": {
+            "units": {"pure": [{"val": 1500, "filed": "2026-11-09"}]}},
+    }}}
+
+
+def _mismatched_filing() -> dict:
+    """Equity Q3 2026 with share counts from Q2 2026."""
+    payload = _coherent_filing()
+    for tag in ("CommonStockClassASharesOutstanding",
+                "CommonStockClassBSharesOutstanding"):
+        for fact in payload["facts"]["us-gaap"][tag]["units"]["shares"]:
+            fact["end"] = "2026-06-30"
+            fact["filed"] = "2026-08-01"
+    return payload
+
+
+class TestAccountingVerdictReachesRegistry:
+    """The extractor's refusal must not be undone by the registry."""
+
+    def _bundle(self, payload):
+        from tradingagents.dataflows.fundamentals import extract_sec_accounting
+
+        return extract_sec_accounting(payload, cik="0001067983",
+                                      as_of_date="2026-11-10")
+
+    def _inputs(self, bundle, price=EOD_CLOSE):
+        return RunInputs(
+            price=price, book_value_per_share=bundle.book_value_per_share,
+            equity=bundle.equity, equity_period_end=bundle.equity_period_end,
+            shares_class_a=bundle.shares_class_a,
+            shares_class_b=bundle.shares_class_b,
+            class_a_to_b_ratio=bundle.class_a_to_b_ratio,
+            equity_provenance={
+                **bundle.equity_provenance,
+                "validation_status": bundle.validation_status,
+                "rejection_reason": bundle.rejection_reason},
+            price_provenance=qualified_price(
+                "BRK-B", price, bar_finality="EOD_CONFIRMED",
+                session_date="2026-11-09"),
+        )
+
+    def test_a_a_mismatched_filing_certifies_nothing(self):
+        bundle = self._bundle(_mismatched_filing())
+        assert bundle.validation_status == "UNVERIFIED"
+        assert bundle.rejection_reason, "the reason must be kept"
+
+        registry = build_run_registry(self._inputs(bundle), run_id="A")
+        bvps = registry.get("book_value_per_share_B")
+        pb = registry.get("price_to_book")
+        assert bvps.is_usable is False
+        assert pb.is_usable is False
+        assert pb.calculation_status is CalculationStatus.REFUSED
+        assert bundle.rejection_reason[:40] in pb.reason
+
+    def test_a2_the_gate_does_not_authorise_a_pb_deal(self):
+        from tradingagents.dataflows.gate_integration import evaluate_decision
+
+        bundle = self._bundle(_mismatched_filing())
+        registry = build_run_registry(self._inputs(bundle), run_id="A2")
+        state = {
+            "company_of_interest": "BRK-B", "trade_date": "2026-11-10",
+            "verified_market_snapshot": {"close": EOD_CLOSE},
+            "fundamentals_report": "P/B of 1.68x.",
+            "final_rating": "Overweight",
+            "final_trade_decision": "**Rating**: Overweight\nBuy.",
+            "trader_investment_plan": "Entry 560.00, stop 552.07, ATR 9.520.",
+        }
+        _, decision = evaluate_decision(
+            "BRK-B", "2026-11-10", state, snapshot_id="A2",
+            metric_registry=registry, trigger_met=True,
+            equity=100_000.0, cash=50_000.0, risk_budget=1000.0,
+            max_symbol_exposure=0.05)
+        assert decision.creates_order is False
+
+    def test_b_a_coherent_filing_certifies_both(self):
+        bundle = self._bundle(_coherent_filing())
+        assert bundle.validation_status == "VERIFIED"
+        registry = build_run_registry(self._inputs(bundle), run_id="B")
+        bvps = registry.get("book_value_per_share_B")
+        pb = registry.get("price_to_book")
+        assert bvps.is_usable is True
+        assert pb.is_usable is True
+        assert float(pb.value) == pytest.approx(1.6811, abs=1e-3)
+
+    def test_c_a_price_without_provenance_is_refused(self):
+        registry = build_run_registry(
+            RunInputs(price=SMA50, book_value_per_share=BVPS,
+                      price_provenance=None), run_id="C")
+        assert registry.get("price_to_book").is_usable is False
+
+    def test_d_a_verified_price_with_unverified_equity_is_refused(self):
+        bundle = self._bundle(_mismatched_filing())
+        inputs = self._inputs(bundle)
+        assert inputs.price_provenance["validation_status"] == "VERIFIED"
+        assert inputs.equity_provenance["validation_status"] == "UNVERIFIED"
+        registry = build_run_registry(inputs, run_id="D")
+        assert registry.get("price_to_book").is_usable is False
+
+    def test_e_a_verified_bvps_is_not_demoted_by_the_report(self):
+        bundle = self._bundle(_coherent_filing())
+        state = {
+            "fundamentals_report": "Book value per share 342.19 USD.",
+            "verified_market_snapshot": {
+                "close": EOD_CLOSE,
+                "price_provenance": qualified_price(
+                    "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED")},
+            "equity": bundle.equity,
+            "equity_period_end": bundle.equity_period_end,
+            "shares_class_a": bundle.shares_class_a,
+            "shares_class_b": bundle.shares_class_b,
+            "class_a_to_b_ratio": bundle.class_a_to_b_ratio,
+            "book_value_per_share": bundle.book_value_per_share,
+            "equity_provenance": {
+                **bundle.equity_provenance,
+                "validation_status": bundle.validation_status},
+        }
+        from tradingagents.dataflows.math.extraction import extract_run_inputs
+        from tradingagents.dataflows.math.run_registry import (
+            registry_inputs_from_state,
+        )
+        from tradingagents.graph.trading_graph import _merge_extracted
+
+        merged = _merge_extracted(registry_inputs_from_state(state),
+                                  extract_run_inputs(state).inputs)
+        registry = build_run_registry(merged, run_id="E")
+        pb = registry.get("price_to_book")
+        assert pb.is_usable is True
+        assert pb.source_status.value == "VERIFIED"
+
+    def test_f_sec_revenue_is_untouched(self):
+        from tradingagents.dataflows.math.sec_revenue_inputs import (
+            revenue_inputs_from_sec,
+        )
+
+        registry = build_run_registry(
+            revenue_inputs_from_sec(dict(F.BOTH_SCOPES), F.ANALYSIS_DATE,
+                                    cik=F.CIK), run_id="F")
+        assert registry.get("consolidated_revenue").value == F.REVENUE_Q3_2026
+        assert registry.get("consolidated_revenue").is_usable is True
+
+    def test_g_an_italian_pb_mismatch_blocks(self):
+        from tradingagents.dataflows.gate_integration import evaluate_decision
+
+        bundle = self._bundle(_coherent_filing())
+        registry = build_run_registry(self._inputs(bundle), run_id="G")
+        state = {
+            "company_of_interest": "BRK-B", "trade_date": "2026-11-10",
+            "verified_market_snapshot": {"close": EOD_CLOSE},
+            "fundamentals_report": "Il P/B è 1,49x.",
+            "final_rating": "Overweight",
+            "final_trade_decision": "**Rating**: Overweight\nBuy.",
+            "trader_investment_plan": "Entry 560.00, stop 552.07, ATR 9.520.",
+        }
+        record, decision = evaluate_decision(
+            "BRK-B", "2026-11-10", state, snapshot_id="G",
+            metric_registry=registry, trigger_met=True,
+            equity=100_000.0, cash=50_000.0, risk_budget=1000.0,
+            max_symbol_exposure=0.05)
+        assert decision.creates_order is False

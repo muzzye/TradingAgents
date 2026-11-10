@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from tests.fixtures import verified_price
 from tradingagents.dataflows.execution_gate import (
     ExecutionAction,
     ExecutionGate,
@@ -249,7 +250,7 @@ class TestCorrectNumbersPass:
             # supplies one rather than relying on an uncertified approval.
             metric_registry=build_run_registry(
                 RunInputs(price=557.0, sma200=500.0,
-                          book_value_per_share=350.0)),
+                          book_value_per_share=350.0, price_provenance=verified_price(557.0))),
         )
         broker = MockPaperBroker()
         gate = ExecutionGate(analysis_as_of=TRADE_DATE)

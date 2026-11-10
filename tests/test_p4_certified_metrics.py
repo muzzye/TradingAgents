@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.fixtures import verified_price
 from tradingagents.dataflows.certified_report import (
     certified_table_markdown,
     render_metric_table,
@@ -52,6 +53,7 @@ def _brkb_inputs(**overrides) -> RunInputs:
         "shares_class_b": SHARES_B, "class_a_to_b_ratio": A_TO_B,
         "price_class": "B",
     }
+    base.setdefault("price_provenance", verified_price(PRICE_IMPLIED))
     base.update(overrides)
     return RunInputs(**base)
 

@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from tests.fixtures import verified_price
 from tradingagents.dataflows.claim_harvester import harvest_facts
 
 
@@ -107,7 +108,7 @@ class TestRegistryWiring:
             # §4: a certified metric is required for approval. The subject here
             # is the fact-harvest wiring, so the run is made otherwise sound.
             metric_registry=build_run_registry(
-                RunInputs(price=570.89, sma200=497.723)),
+                RunInputs(price=570.89, sma200=497.723, price_provenance=verified_price(570.89))),
         )
         assert record.fact_registry is not None
         assert not record.fact_registry.blocks_decision

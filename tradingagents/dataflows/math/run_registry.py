@@ -137,12 +137,11 @@ def price_is_qualified(inputs: RunInputs) -> bool:
     if inputs.price is None:
         return False
     provenance = inputs.price_provenance
-    if provenance is None:
-        # No provenance at all: a caller constructing RunInputs directly (the
-        # math tests do) means "a price". The state path always supplies one, so
-        # production cannot reach this branch by accident.
-        return True
     if not isinstance(provenance, dict):
+        # Finding 2 of the final review: a price with no provenance is a number
+        # whose kind nobody stated. Accepting it is how a moving average gets
+        # certified as a spot price. The state path always carries one, and the
+        # tests that construct RunInputs directly now say what they mean.
         return False
 
     kind = str(provenance.get("kind") or "").lower()
@@ -150,6 +149,42 @@ def price_is_qualified(inputs: RunInputs) -> bool:
     if kind not in MARKET_PRICE_KINDS:
         return False
     return status == "VERIFIED"
+
+
+# The accounting bundle's own validation state (FIX #2, finding 2).
+#
+# The extractor judges whether a filing agrees with itself. Its verdict must
+# travel to the registry with the operands, because the registry can recompute a
+# book value from numbers that are individually present and jointly
+# incompatible: an equity from Q3 divided by share counts from Q2 produces a
+# perfectly formed figure that means nothing.
+ACCOUNTING_VERIFIED = "VERIFIED"
+ACCOUNTING_UNVERIFIED = "UNVERIFIED"
+
+
+def accounting_may_certify(inputs: RunInputs) -> bool:
+    """Whether the accounting operands may certify a book value or a P/B.
+
+    An absent bundle is allowed: a caller that never ran the extractor is not
+    claiming a filing certified anything, and the value then rests on whatever
+    it supplied. A *present* bundle that says ``UNVERIFIED`` — incompatible
+    periods, a non-attributable concept, a missing ratio — refuses, whatever the
+    operands look like.
+    """
+    provenance = inputs.equity_provenance
+    if not isinstance(provenance, dict):
+        return True
+    status = str(provenance.get("validation_status") or "").upper()
+    return status != ACCOUNTING_UNVERIFIED
+
+
+def accounting_rejection(inputs: RunInputs) -> str:
+    """Why the accounting bundle refused, for the record's reason field."""
+    provenance = inputs.equity_provenance or {}
+    if not isinstance(provenance, dict):
+        return ""
+    return str(provenance.get("rejection_reason")
+               or "the accounting bundle was not verified")
 
 
 def _register_if_computable(registry: MetricRegistry, name: str,
@@ -180,8 +215,17 @@ def _register_if_computable(registry: MetricRegistry, name: str,
 
 
 def _source_of(inputs: RunInputs, *names: str) -> SourceStatus:
-    """VERIFIED only when none of the inputs was the model's own claim."""
+    """VERIFIED only when none of the inputs was the model's own claim.
+
+    A refusal from the accounting extractor also lands here: a bundle it judged
+    unusable is not a verified source, whatever its operands look like.
+    """
     if set(inputs.claimed_inputs).intersection(names):
+        return SourceStatus.LLM_CLAIMED
+    if set(names).intersection(("equity", "book_value_per_share",
+                                "shares_class_a", "shares_class_b",
+                                "class_a_to_b_ratio")) \
+            and not accounting_may_certify(inputs):
         return SourceStatus.LLM_CLAIMED
     return SourceStatus.VERIFIED
 
@@ -353,6 +397,44 @@ def _register_dual_class_valuation(registry: MetricRegistry,
         dual_class_book_value_per_share,
     )
     from tradingagents.dataflows.valuation import EquityInputs, reconcile_valuation
+
+    # FIX #2 (finding 2): the accounting bundle's verdict travels with its
+    # operands. An extractor that rejected the filing — incompatible periods, a
+    # non-attributable equity concept, a missing ratio — must not have its
+    # numbers recomputed into a certified book value. The operands being
+    # present is not the same as their being usable.
+    if not accounting_may_certify(inputs):
+        reason = accounting_rejection(inputs)
+        registry.register(metric(
+            "book_value_per_share_B", None, unit="base_per_share",
+            formula_id="equity_div_class_b_equivalent_shares",
+            operands={"equity": inputs.equity,
+                      "shares_a": inputs.shares_class_a,
+                      "shares_b": inputs.shares_class_b,
+                      "ratio": inputs.class_a_to_b_ratio,
+                      "equity_provenance": inputs.equity_provenance},
+            calculation_status=CalculationStatus.REFUSED,
+            reason=(f"the accounting inputs were refused: {reason}"
+                    if reason else "the accounting inputs were refused"),
+        ))
+        registry.register(metric(
+            "price_to_book", None, unit="multiple", formula_id="price_div_bvps",
+            operands={"price": inputs.price,
+                      "equity_provenance": inputs.equity_provenance},
+            calculation_status=CalculationStatus.REFUSED,
+            reason=(f"the book value rests on refused accounting inputs: {reason}"
+                    if reason else
+                    "the book value rests on refused accounting inputs"),
+        ))
+        registry.register(metric(
+            "pb_aggregate", None, unit="multiple",
+            formula_id="market_cap_div_attributable_equity",
+            operands={"equity": inputs.equity,
+                      "equity_provenance": inputs.equity_provenance},
+            calculation_status=CalculationStatus.REFUSED,
+            reason="the attributable equity is not verified",
+        ))
+        return
 
     # FIX #2: a moving average is not a share price. Refuse the numerator here,
     # before any arithmetic, so no multiple is produced from one — the

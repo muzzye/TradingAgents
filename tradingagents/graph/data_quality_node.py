@@ -136,6 +136,17 @@ def create_data_quality_check(filings_provider=None, sec_facts_provider=None,
                 update["revenue_prior"] = revenue_inputs.revenue_prior
 
         if accounting is not None:
+            # FIX #2 (finding 2): the verdict travels with the operands. When
+            # the extractor rejected the filing, its numbers are published with
+            # the rejection attached so the registry refuses them — hiding them
+            # would leave "no data" and "refused data" indistinguishable in the
+            # audit, and publishing them bare is how a book value got certified
+            # from mismatched periods.
+            provenance = dict(accounting.equity_provenance or {})
+            provenance["validation_status"] = accounting.validation_status
+            if accounting.rejection_reason:
+                provenance["rejection_reason"] = accounting.rejection_reason
+            update["equity_provenance"] = provenance
             for field_name, value in (
                 ("equity", accounting.equity),
                 ("equity_period_end", accounting.equity_period_end),
@@ -143,7 +154,6 @@ def create_data_quality_check(filings_provider=None, sec_facts_provider=None,
                 ("shares_class_b", accounting.shares_class_b),
                 ("class_a_to_b_ratio", accounting.class_a_to_b_ratio),
                 ("book_value_per_share", accounting.book_value_per_share),
-                ("equity_provenance", accounting.equity_provenance or None),
             ):
                 if value is not None:
                     update[field_name] = value

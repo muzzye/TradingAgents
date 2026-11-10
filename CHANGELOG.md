@@ -19,6 +19,27 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.18] — 2026-11-10
+
+### Fixed
+
+- **A refused accounting bundle can no longer certify a book value.** The
+  extractor judges whether a filing agrees with itself, but its verdict never
+  reached the registry: the Data Quality node published equity, share counts
+  and the ratio regardless, `_register_dual_class_valuation` recomputed the book
+  value from them, and `_source_of` never consulted the bundle's status. A run
+  with equity from Q3 and share counts from Q2 therefore produced a `VERIFIED`
+  P/B of 1.6811 from numbers the extractor had rejected. The verdict now travels
+  with the operands: the node keeps `validation_status` and
+  `rejection_reason` in `equity_provenance`, and the registry refuses the book
+  value, the P/B and the aggregate form with the reason recorded.
+- **A price with no provenance no longer prices a multiple.** The lenient branch
+  accepted a bare `RunInputs(price=...)` as a quote, which is how the SMA50 was
+  certified as a spot price. The state path always carries provenance; tests
+  that construct `RunInputs` directly now say what their price is, through a
+  shared `verified_price()` fixture, rather than relying on production being
+  permissive.
+
 ## [0.8.17] — 2026-11-10
 
 ### Fixed
