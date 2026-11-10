@@ -19,6 +19,21 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.22] — 2026-11-10
+
+### Fixed
+
+- **A code comment claimed a mechanism the code does not implement.** The
+  FIX #3 guard on the trailing P/E carried a note saying the registry validator
+  "agreed" with an indicator-derived P/E because the metric it compared against
+  was itself built on the indicator, so "agreement with a wrong baseline
+  launders the claim". Running the code disproves it: the validator extracts P/B
+  claims but never P/E claims, so there is no comparison and no laundering. The
+  comment now states what the guard actually does and what it explicitly does
+  not do. A new test asserts the limitation itself, so the two cannot drift
+  apart again — if P/E claim extraction is ever added, that test fails and the
+  comment must be corrected with it.
+
 ## [0.8.21] — 2026-11-10
 
 ### Fixed

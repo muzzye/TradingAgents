@@ -182,6 +182,30 @@ class TestTheRegistryNoLongerContradictsItself:
         assert certified == [], (
             f"a multiple was certified from an indicator: {certified}")
 
+    def test_a_reported_pe_claim_is_not_extracted_so_it_cannot_block(self):
+        """The limitation, asserted so the code comment cannot drift from it.
+
+        `run_registry.py` documents that this fix does not make a reported P/E
+        claim block, because the validator extracts P/B claims but not P/E
+        ones. A comment is not evidence; this test is. If claim extraction is
+        later extended to P/E, this test fails and the comment must be updated
+        with it.
+        """
+        from tradingagents.dataflows.math.price_source import indicator_as_price
+        from tradingagents.dataflows.math.report_validation import (
+            validate_analyst_report,
+        )
+
+        registry = _build(indicator_as_price("sma50", INDICATOR_PRICE, "AAPL"))
+        for text in ("P/E of 77.48x.", "P/E 77,48x.", "trailing P/E 77.48x"):
+            validation = validate_analyst_report(
+                text, agent="fundamentals", registry=registry)
+            extracted = len(validation.claims.results) if validation.claims else 0
+            assert extracted == 0, (
+                f"{text!r} is now extracted as a P/E claim; the known-limitation "
+                "note in run_registry.py and the CHANGELOG are now out of date")
+            assert validation.blocks_decision is False
+
 
 class TestNoCollateralDamage:
     """Indicators stay usable *as indicators*, and unrelated metrics are untouched.
