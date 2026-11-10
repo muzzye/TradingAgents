@@ -33,9 +33,13 @@ Istruzioni per l'agente AI:
   figure in that position also escaped the check.
 
 - **The Italian conjunctions no longer match inside `P/E`.** `\be\b` matched the
-  `E` of the label, so every prefix was cut at the second character and the
-  qualifier check was effectively disabled for claims written without a space
-  before the slash. `e` and `ma` now require a space on both sides.
+  `E` of the label — `'The P/E 18.2x (forward)'` stopped at position 6, inside
+  the label — so the prefix was cut at the second character of the sentence. It
+  did not change the outcome for the phrasings in the test suite, because the
+  eliminator matched before the label either way, but it made the boundary
+  depend on which side of the match the letter happened to fall. `e` and `ma`
+  now require a space on both sides, which distinguishes the conjunction from
+  the letter inside a label.
 
 ### Unchanged
 
