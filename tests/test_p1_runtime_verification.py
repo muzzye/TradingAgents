@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from tests.fixtures import verified_price
+from tests.fixtures import verified_accounting, verified_price
 from tradingagents.build_info import LOADED_AT, build_info, commit_sha
 from webapp.__main__ import startup_diagnostics
 
@@ -137,7 +137,9 @@ class TestR2AgentRegistry:
         )
 
         registry = build_run_registry(
-            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74)), run_id="r1")
+            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ), run_id="r1")
         assert registry.get("price_to_book").is_usable is True
 
         with math_tools.certified_registry(registry):
@@ -165,9 +167,13 @@ class TestR2AgentRegistry:
         )
 
         first = build_run_registry(
-            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74)), run_id="run-a")
+            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ), run_id="run-a")
         second = build_run_registry(
-            RunInputs(price=100.0, book_value_per_share=50.0, price_provenance=verified_price(100.0)), run_id="run-b")
+            RunInputs(price=100.0, book_value_per_share=50.0, price_provenance=verified_price(100.0),
+            equity_provenance=verified_accounting()
+        ), run_id="run-b")
 
         with math_tools.certified_registry(first):
             inside_first = math_tools._run_registry()

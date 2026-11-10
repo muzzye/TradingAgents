@@ -19,3 +19,21 @@ def verified_price(value: float, *, kind: str = "eod_close",
         "bar_finality": "EOD_CONFIRMED" if kind == "eod_close" else "INTRADAY_PARTIAL",
         "validation_status": "VERIFIED",
     }
+
+
+# FIX #2 (final review 2): a book value needs its own verified provenance. The
+# registry certifies a P/B only when the accounting inputs say VERIFIED — the
+# same standard the price has carried since the first commit of this fix.
+def verified_accounting(*, concept: str = "StockholdersEquity",
+                        period_end: str = "2026-09-30",
+                        accession: str = "0001067983-26-000042",
+                        cik: str = "0001067983") -> dict:
+    """The provenance a test's book value carries, in the shape production writes."""
+    return {
+        "concept": concept,
+        "validation_status": "VERIFIED",
+        "period_end": period_end,
+        "accession": accession,
+        "cik": cik,
+        "unit": "USD",
+    }

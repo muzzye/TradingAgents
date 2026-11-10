@@ -19,6 +19,30 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.19] — 2026-11-10
+
+### Fixed
+
+- **Absence of accounting provenance is no longer treated as verified.**
+  `accounting_may_certify()` returned `True` whenever `equity_provenance` was
+  absent, so a price with a `VERIFIED` provenance multiplied by a bare
+  `book_value_per_share` certified a P/B of 1.6342 — a book value nobody had
+  vouched for. The check is now a whitelist: only an explicit `VERIFIED`
+  status qualifies, while an absent, empty, `UNKNOWN` or `UNVERIFIED`
+  provenance refuses the book value, the per-share P/B and the aggregate form,
+  recording the rejection reason. A non-SEC source is not special-cased; it
+  becomes usable by stating the same status, never through a bypass here.
+- A run offering no accounting operand at all keeps producing
+  `NOT_COMPUTABLE` rather than a refusal: a gap is reported, a contradiction
+  blocks, and the two must stay distinguishable.
+
+### Changed
+
+- The test fixtures that build `RunInputs` or a graph state directly now state
+  the accounting provenance of their equity and share counts, through a shared
+  `verified_accounting()` helper. The stricter rule is not weakened for them —
+  they declare what production declares.
+
 ## [0.8.18] — 2026-11-10
 
 ### Fixed

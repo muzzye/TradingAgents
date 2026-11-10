@@ -328,6 +328,17 @@ class BrkbFixture:
             "final_rating": "Overweight",
             "verified_market_snapshot": self.market_snapshot(),
             "equity": self.equity,
+            # FIX #2 (final review 2): the book value is certified only when its
+            # accounting provenance says VERIFIED, exactly as the price is.
+            "equity_provenance": {
+                "concept": "StockholdersEquity",
+                "validation_status": "VERIFIED",
+                "period_end": "2026-09-30",
+                "accession": "0001067983-26-000042",
+                "cik": "0001067983",
+                "unit": "USD",
+            },
+            "equity_period_end": "2026-09-30",
             "shares_class_a": self.shares_class_a,
             "shares_class_b": self.shares_class_b,
             "class_a_to_b_ratio": self.class_a_to_b_ratio,

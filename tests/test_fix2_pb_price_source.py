@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import pytest
 
-from tests.fixtures import sec_revenue_payloads as F
+from tests.fixtures import (
+    sec_revenue_payloads as F,
+    verified_accounting,
+)
 from tradingagents.dataflows.math.metric_record import CalculationStatus
 from tradingagents.dataflows.math.price_source import qualified_price
 from tradingagents.dataflows.math.run_registry import RunInputs, build_run_registry
@@ -55,6 +58,7 @@ class TestT1SmaIsNotAPrice:
             book_value_per_share=BVPS,
             price_provenance={"kind": "indicator", "indicator": "sma50",
                               "validation_status": "NOT_A_PRICE"},
+            equity_provenance=verified_accounting()
         )
         registry = build_run_registry(inputs, run_id="t1")
         metric = registry.get("price_to_book")
@@ -73,6 +77,7 @@ class TestT2T3QualifiedPrices:
             price_provenance={"kind": "intraday", "timestamp":
                               "2026-11-10T16:00:00+00:00",
                               "validation_status": "VERIFIED"},
+            equity_provenance=verified_accounting()
         )
         registry = build_run_registry(inputs, run_id="t2")
         metric = registry.get("price_to_book")
@@ -85,6 +90,7 @@ class TestT2T3QualifiedPrices:
             price_provenance={"kind": "eod_close",
                               "timestamp": "2026-11-09T21:00:00+00:00",
                               "validation_status": "VERIFIED"},
+            equity_provenance=verified_accounting()
         )
         registry = build_run_registry(inputs, run_id="t3")
         metric = registry.get("price_to_book")
@@ -99,7 +105,9 @@ class TestT2T3QualifiedPrices:
 class TestT4NoPriceAtAll:
     def test_only_an_indicator_available_means_no_multiple(self):
         inputs = RunInputs(price=None, book_value_per_share=BVPS,
-                           sma50=SMA50, sma200=502.85)
+                           sma50=SMA50, sma200=502.85,
+            equity_provenance=verified_accounting()
+        )
         registry = build_run_registry(inputs, run_id="t4")
         metric = registry.get("price_to_book")
         assert metric.is_usable is False
@@ -111,7 +119,9 @@ class TestT4NoPriceAtAll:
     def test_the_indicators_are_still_recorded_as_indicators(self):
         """Refusing them as a price must not lose them as indicators."""
         inputs = RunInputs(price=None, book_value_per_share=BVPS, sma50=SMA50,
-                           previous_close=EOD_CLOSE)
+                           previous_close=EOD_CLOSE,
+            equity_provenance=verified_accounting()
+        )
         registry = build_run_registry(inputs, run_id="t4b")
         assert registry.get("price_to_book").value is None
 
@@ -161,6 +171,7 @@ class TestT7IncoherentInputs:
                               "timestamp": "2026-06-30T20:00:00+00:00",
                               "validation_status": "VERIFIED"},
             equity_period_end="2026-09-30",
+            equity_provenance=verified_accounting()
         )
         registry = build_run_registry(inputs, run_id="t7")
         metric = registry.get("price_to_book")
@@ -179,6 +190,7 @@ class TestT8Aggregate:
             price=EOD_CLOSE, market_cap_reported=1_231_440_000_000.0,
             equity=761_368_000_000.0, price_provenance={
                 "kind": "eod_close", "validation_status": "VERIFIED"},
+            equity_provenance=verified_accounting()
         )
         registry = build_run_registry(inputs, run_id="t8")
         aggregate = registry.get("pb_aggregate")
@@ -189,7 +201,9 @@ class TestT8Aggregate:
             price=SMA50, market_cap_reported=1_231_440_000_000.0,
             equity=761_368_000_000.0,
             price_provenance={"kind": "indicator", "indicator": "sma50",
-                              "validation_status": "NOT_A_PRICE"})
+                              "validation_status": "NOT_A_PRICE"},
+            equity_provenance=verified_accounting()
+        )
         registry = build_run_registry(inputs, run_id="t8b")
         assert registry.get("pb_aggregate").is_usable is False
 
@@ -202,7 +216,9 @@ class TestT9T10ClaimsValidator:
         return build_run_registry(
             RunInputs(price=INTRADAY_PRICE, book_value_per_share=BVPS,
                       price_provenance={"kind": "intraday",
-                                        "validation_status": "VERIFIED"}),
+                                        "validation_status": "VERIFIED"},
+            equity_provenance=verified_accounting()
+        ),
             run_id="claims")
 
     def test_t9_a_pb_computed_from_the_sma_is_a_mismatch(self):
@@ -257,7 +273,9 @@ class TestT11Persistence:
                       price_provenance={
                           "kind": "eod_close", "source": "yfinance",
                           "timestamp": "2026-11-09T21:00:00+00:00",
-                          "validation_status": "VERIFIED"}),
+                          "validation_status": "VERIFIED"},
+            equity_provenance=verified_accounting()
+        ),
             run_id="t11")
         metric = registry.get("price_to_book")
         assert metric.formula_id == "price_div_bvps"
@@ -280,6 +298,7 @@ class TestT11Persistence:
             shares_class_a=550_000.0,
             shares_class_b=1_400_000_000.0,
             class_a_to_b_ratio=1500.0,
+            equity_provenance=verified_accounting()
         )
         registry = build_run_registry(inputs, run_id="t11b")
         table = render_metric_table(registry)
@@ -356,6 +375,7 @@ class TestCompiledGraphPath:
         state["shares_class_a"] = 550_000.0
         state["shares_class_b"] = 1_400_000_000.0
         state["class_a_to_b_ratio"] = 1500.0
+        state["equity_provenance"] = verified_accounting()
 
         merged = _merge_extracted(
             registry_inputs_from_state(state),
@@ -480,7 +500,9 @@ class TestProvenanceRefusals:
     def _registry(self, price, provenance):
         return build_run_registry(
             RunInputs(price=price, book_value_per_share=BVPS,
-                      price_provenance=provenance), run_id="refuse")
+                      price_provenance=provenance,
+            equity_provenance=verified_accounting()
+        ), run_id="refuse")
 
     def test_t3_a_bare_dict_close_cannot_price_a_multiple(self):
         """The reviewer's case: `{"close": 522.97}` with no validation."""
@@ -535,7 +557,9 @@ class TestProvenanceRefusals:
             price=EOD_CLOSE, book_value_per_share=BVPS,
             claimed_inputs=("book_value_per_share",),
             price_provenance=qualified_price(
-                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED"))
+                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED"),
+            equity_provenance=verified_accounting()
+        )
         registry = build_run_registry(inputs, run_id="bvps-claim")
         assert registry.get("price_to_book").is_usable is False
 
@@ -544,7 +568,9 @@ class TestProvenanceRefusals:
             price=SMA50, market_cap_reported=1_231_440_000_000.0,
             equity=761_368_000_000.0,
             price_provenance={"kind": "indicator",
-                              "validation_status": "NOT_A_PRICE"})
+                              "validation_status": "NOT_A_PRICE"},
+            equity_provenance=verified_accounting()
+        )
         registry = build_run_registry(inputs, run_id="agg")
         assert registry.get("pb_aggregate").is_usable is False
 
@@ -574,7 +600,9 @@ class TestItalianMultiples:
             price=INTRADAY_PRICE, book_value_per_share=BVPS,
             price_provenance=qualified_price(
                 "BRK-B", INTRADAY_PRICE, bar_finality="INTRADAY_PARTIAL",
-                observation_timestamp="2026-11-10T16:00:00Z")),
+                observation_timestamp="2026-11-10T16:00:00Z"),
+            equity_provenance=verified_accounting()
+        ),
             run_id="it-ok")
         validation = validate_analyst_report(
             "P/B 1,64x", agent="fundamentals", registry=registry)
@@ -589,7 +617,9 @@ class TestItalianMultiples:
             price=INTRADAY_PRICE, book_value_per_share=BVPS,
             price_provenance=qualified_price(
                 "BRK-B", INTRADAY_PRICE, bar_finality="INTRADAY_PARTIAL",
-                observation_timestamp="2026-11-10T16:00:00Z")),
+                observation_timestamp="2026-11-10T16:00:00Z"),
+            equity_provenance=verified_accounting()
+        ),
             run_id="it-bad")
         validation = validate_analyst_report(
             "P/B 1,49x", agent="fundamentals", registry=registry)
@@ -887,7 +917,9 @@ class TestAccountingVerdictReachesRegistry:
     def test_c_a_price_without_provenance_is_refused(self):
         registry = build_run_registry(
             RunInputs(price=SMA50, book_value_per_share=BVPS,
-                      price_provenance=None), run_id="C")
+                      price_provenance=None,
+            equity_provenance=verified_accounting()
+        ), run_id="C")
         assert registry.get("price_to_book").is_usable is False
 
     def test_d_a_verified_price_with_unverified_equity_is_refused(self):
@@ -959,3 +991,91 @@ class TestAccountingVerdictReachesRegistry:
             equity=100_000.0, cash=50_000.0, risk_budget=1000.0,
             max_symbol_exposure=0.05)
         assert decision.creates_order is False
+
+
+# ===========================================================================
+# Final review 2 — accounting provenance must be explicitly VERIFIED
+# ===========================================================================
+class TestAccountingProvenanceRequired:
+    """A BVPS is certified only when its accounting provenance says VERIFIED.
+
+    `accounting_may_certify()` returned True when the provenance was absent, so
+    a price with provenance plus a bare `book_value_per_share` certified a P/B
+    from a book value nobody had verified. Absence of evidence was treated as
+    evidence of soundness, which is the fail-open the whole fix exists to
+    remove.
+    """
+
+    def _inputs(self, bvps=352.0, provenance=None):
+        return RunInputs(
+            price=EOD_CLOSE, book_value_per_share=bvps,
+            price_provenance=qualified_price(
+                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED"),
+            equity_provenance=provenance,
+        )
+
+    def test_a_verified_price_with_no_accounting_provenance_is_refused(self):
+        registry = build_run_registry(self._inputs(), run_id="p-none")
+        assert registry.get("price_to_book").is_usable is False
+
+    def test_equity_and_share_counts_without_provenance_certify_nothing(self):
+        inputs = RunInputs(
+            price=EOD_CLOSE,
+            equity=761_368_000_000.0, equity_period_end="2026-09-30",
+            shares_class_a=550_000.0, shares_class_b=1_400_000_000.0,
+            class_a_to_b_ratio=1500.0,
+            price_provenance=qualified_price(
+                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED"),
+            equity_provenance=None,
+        )
+        registry = build_run_registry(inputs, run_id="p-inputs")
+        assert registry.get("book_value_per_share_B").is_usable is False
+        assert registry.get("price_to_book").is_usable is False
+
+    def test_an_unknown_provenance_is_refused(self):
+        registry = build_run_registry(
+            self._inputs(provenance={"validation_status": "UNKNOWN"}),
+            run_id="p-unknown")
+        assert registry.get("price_to_book").is_usable is False
+
+    def test_an_empty_provenance_is_refused(self):
+        registry = build_run_registry(
+            self._inputs(provenance={}), run_id="p-empty")
+        assert registry.get("price_to_book").is_usable is False
+
+    def test_an_unverified_provenance_is_refused_with_its_reason(self):
+        registry = build_run_registry(self._inputs(provenance={
+            "validation_status": "UNVERIFIED",
+            "rejection_reason": "share counts from another period"}),
+            run_id="p-unverified")
+        metric = registry.get("price_to_book")
+        assert metric.is_usable is False
+        assert "share counts from another period" in metric.reason
+
+    def test_verified_provenance_with_coherent_inputs_certifies(self):
+        inputs = RunInputs(
+            price=EOD_CLOSE,
+            equity=761_368_000_000.0, equity_period_end="2026-09-30",
+            shares_class_a=550_000.0, shares_class_b=1_400_000_000.0,
+            class_a_to_b_ratio=1500.0,
+            price_provenance=qualified_price(
+                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED"),
+            equity_provenance={"validation_status": "VERIFIED",
+                               "concept": "StockholdersEquity"},
+        )
+        registry = build_run_registry(inputs, run_id="p-verified")
+        assert registry.get("book_value_per_share_B").is_usable is True
+        assert registry.get("price_to_book").is_usable is True
+
+    def test_the_contract_itself(self):
+        from tradingagents.dataflows.math.run_registry import (
+            accounting_may_certify,
+        )
+
+        assert accounting_may_certify(self._inputs()) is False
+        assert accounting_may_certify(
+            self._inputs(provenance={"validation_status": "UNKNOWN"})) is False
+        assert accounting_may_certify(
+            self._inputs(provenance={"validation_status": "UNVERIFIED"})) is False
+        assert accounting_may_certify(
+            self._inputs(provenance={"validation_status": "VERIFIED"})) is True

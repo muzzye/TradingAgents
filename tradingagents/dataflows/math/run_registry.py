@@ -165,17 +165,22 @@ ACCOUNTING_UNVERIFIED = "UNVERIFIED"
 def accounting_may_certify(inputs: RunInputs) -> bool:
     """Whether the accounting operands may certify a book value or a P/B.
 
-    An absent bundle is allowed: a caller that never ran the extractor is not
-    claiming a filing certified anything, and the value then rests on whatever
-    it supplied. A *present* bundle that says ``UNVERIFIED`` — incompatible
-    periods, a non-attributable concept, a missing ratio — refuses, whatever the
-    operands look like.
+    A whitelist, not a blacklist. Only an *explicit* ``VERIFIED`` provenance
+    qualifies. Absence, an empty dict, ``UNKNOWN`` and ``UNVERIFIED`` all
+    refuse — an earlier version returned True for an absent one, which let a
+    verified price multiplied by an unverified book value produce a certified
+    P/B. Absence of evidence is not evidence.
+
+    A non-SEC source is not special-cased: whatever produces the accounting
+    facts must state the same ``VERIFIED`` status for them to be usable, so a
+    new vendor is supported by giving it that provenance rather than by adding
+    a bypass here.
     """
     provenance = inputs.equity_provenance
-    if not isinstance(provenance, dict):
-        return True
+    if not isinstance(provenance, dict) or not provenance:
+        return False
     status = str(provenance.get("validation_status") or "").upper()
-    return status != ACCOUNTING_UNVERIFIED
+    return status == ACCOUNTING_VERIFIED
 
 
 def accounting_rejection(inputs: RunInputs) -> str:
@@ -403,7 +408,18 @@ def _register_dual_class_valuation(registry: MetricRegistry,
     # non-attributable equity concept, a missing ratio — must not have its
     # numbers recomputed into a certified book value. The operands being
     # present is not the same as their being usable.
-    if not accounting_may_certify(inputs):
+    # Whether any accounting operand was offered at all. A run with none is a
+    # gap, not a contradiction — it must stay NOT_COMPUTABLE, otherwise every
+    # analysis without a valuation becomes a blocking decision. Once an operand
+    # is present, the provenance has to justify it: absence of evidence is not
+    # evidence, so a missing provenance refuses exactly like an explicit one.
+    has_accounting_operands = any(
+        operand is not None for operand in (
+            inputs.equity, inputs.book_value_per_share,
+            inputs.shares_class_a, inputs.shares_class_b,
+            inputs.class_a_to_b_ratio,
+        ))
+    if has_accounting_operands and not accounting_may_certify(inputs):
         reason = accounting_rejection(inputs)
         registry.register(metric(
             "book_value_per_share_B", None, unit="base_per_share",

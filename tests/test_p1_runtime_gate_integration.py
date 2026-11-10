@@ -21,7 +21,7 @@ import json
 
 import pytest
 
-from tests.fixtures import verified_price
+from tests.fixtures import verified_accounting, verified_price
 from tradingagents.dataflows.execution_gate import ExecutionAction, GateReason
 from tradingagents.dataflows.gate_integration import (
     ExecutionAuthorization,
@@ -108,7 +108,9 @@ class TestRegistryReachesTheGate:
     def test_a_supplied_registry_is_used_for_verification(self):
         """§5.1: a valid registry is delivered and its metrics are checked."""
         registry = build_run_registry(
-            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74)))
+            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ))
         record, decision, state = _run(registry, _state("P/B of 1.6040x."))
         assert state["metric_registry_status"]["metrics_usable"] >= 1
         # The claim was compared, not merely ignored.
@@ -120,7 +122,9 @@ class TestRegistryReachesTheGate:
     def test_the_registry_is_per_run_not_shared(self):
         """§3: two runs get two registries; one cannot certify the other."""
         first = build_run_registry(RunInputs(price=576.74,
-                                             book_value_per_share=359.5599, price_provenance=verified_price(576.74)),
+                                             book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ),
                                    run_id="run-a")
         second = build_run_registry(RunInputs(), run_id="run-b")
         assert first is not second
@@ -136,7 +140,9 @@ class TestRegistryReachesTheGate:
     def test_the_registry_is_built_from_engine_computation_not_prose(self):
         """§3: values come from `math/`, and a missing input is NOT_COMPUTABLE."""
         registry = build_run_registry(RunInputs(price=576.74,
-                                                book_value_per_share=359.5599, price_provenance=verified_price(576.74)))
+                                                book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ))
         pb = registry.get("price_to_book")
         assert pb is not None
         assert pb.formula_id == "price_div_bvps"
@@ -185,7 +191,9 @@ class TestValidAndInvalidMetrics:
     def test_correct_metrics_approve_the_order(self):
         """§5.4: certified values that agree with the report authorise."""
         registry = build_run_registry(
-            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74)))
+            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ))
         _, decision, state = _run(registry, _state("P/B of 1.6040x."))
         assert state["execution_authorization"] == str(
             ExecutionAuthorization.APPROVED)
@@ -194,7 +202,9 @@ class TestValidAndInvalidMetrics:
     def test_a_contradicted_metric_blocks(self):
         """§5.5: 1.35x against a computed 1.6040 is disproved, so it blocks."""
         registry = build_run_registry(
-            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74)))
+            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ))
         _, decision, state = _run(registry, _state("P/B of 1.35x."))
         assert decision.action is ExecutionAction.BLOCK
         assert state["execution_authorization"] == str(
@@ -233,7 +243,9 @@ class TestValidatorIsCalled:
     def test_the_claims_validator_produced_results(self):
         """§5.6: proof the validator ran, not just that it exists."""
         registry = build_run_registry(
-            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74)))
+            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ))
         record, _, _ = _run(registry, _state("P/B of 1.35x."))
         claims = record.math_verdict.report.claims
         assert claims is not None
@@ -242,7 +254,9 @@ class TestValidatorIsCalled:
 
     def test_the_claim_carries_the_agent_and_both_values(self):
         registry = build_run_registry(
-            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74)))
+            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ))
         record, _, _ = _run(registry, _state("P/B of 1.35x."))
         payload = record.math_verdict.report.claims.summary()
         claim = payload["claims"][0]
@@ -267,7 +281,9 @@ class TestTwoOutcomesAreDistinct:
     def test_a_wait_is_not_applicable_not_blocked(self):
         """A sound plan that is simply not time to act is not a refusal."""
         registry = build_run_registry(
-            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74)))
+            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ))
         state = _state()
         _, decision = evaluate_decision(
             "BRK-B", "2026-11-09", state, snapshot_id="w", trigger_met=False,
@@ -283,7 +299,9 @@ class TestTwoOutcomesAreDistinct:
         from tradingagents.dataflows.execution_gate import ExecutionGate
 
         registry = build_run_registry(
-            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74)))
+            RunInputs(price=576.74, book_value_per_share=359.5599, price_provenance=verified_price(576.74),
+            equity_provenance=verified_accounting()
+        ))
         _, decision, _ = _run(registry, _state("P/B of 1.35x."))
         gate = ExecutionGate(analysis_as_of="2026-11-09")
         assert decision.creates_order is False
