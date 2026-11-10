@@ -323,9 +323,17 @@ class TestT12T13NoRegression:
         assert registry.get("consolidated_revenue").is_usable is True
 
     def test_t13_indicators_and_eps_behave_as_before(self):
-        inputs = RunInputs(price=EOD_CLOSE, sma50=SMA50, sma200=502.85,
-                           period_high=812.35, eps_ttm=39.76,
-                           weighted_average_shares=1_437_000_000.0)
+        # FIX #3: the indicators are still computed from the price, so the
+        # price must be one. The fixture says what it is, exactly as the state
+        # path does — the rule is not relaxed for the test.
+        inputs = RunInputs(
+            price=EOD_CLOSE,
+            price_provenance=qualified_price(
+                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED",
+                session_date="2026-11-09"),
+            sma50=SMA50, sma200=502.85,
+            period_high=812.35, eps_ttm=39.76,
+            weighted_average_shares=1_437_000_000.0)
         registry = build_run_registry(inputs, run_id="t13")
         assert registry.get("distance_from_sma50").value is not None
         assert registry.get("distance_from_sma200").value is not None

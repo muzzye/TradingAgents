@@ -19,6 +19,35 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.21] — 2026-11-10
+
+### Fixed
+
+- **A session return and a distance from a level now need a market price too.**
+  The previous commit refused an indicator as the numerator of a trailing P/E
+  but left `session_return`, `distance_from_sma50`, `distance_from_sma200` and
+  `distance_from_high` computing from the same unqualified `inputs.price`. They
+  are equally price-derived: "the stock rose 0.57%" computed from a moving
+  average is a fabricated observation, not a measured one, and it appeared in
+  the Certified Metrics table as `certified` beside a P/B refused for exactly
+  that numerator. All four now apply the same `price_is_qualified` test.
+
+  The two failure modes are kept distinct, because they mean different things:
+  a price that was **offered** and cannot be qualified is `REFUSED` and joins
+  the blocking set; a price that was **never offered** stays `NOT_COMPUTABLE`
+  and remains a reported gap, not a contradiction.
+
+- The indicators themselves are untouched. SMA50, SMA200, ATR and the period
+  high remain valid inputs to these formulas and to the risk engine — only the
+  `price` slot must hold a price. `eps_gaap` is unaffected: it divides net
+  income by share count and involves no price at all.
+
+### Changed
+
+- The legacy fixture in `test_fix2_pb_price_source.py` that exercised the
+  indicator path now declares its price provenance, as the state path does. The
+  rule was not relaxed for the test.
+
 ## [0.8.20] — 2026-11-10
 
 ### Fixed

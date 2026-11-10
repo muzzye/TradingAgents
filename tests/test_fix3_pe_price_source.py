@@ -184,9 +184,57 @@ class TestTheRegistryNoLongerContradictsItself:
 
 
 class TestNoCollateralDamage:
-    """Metrics that use the price as a level, not as a valuation, are untouched."""
+    """Indicators stay usable *as indicators*, and unrelated metrics are untouched.
 
-    def test_session_return_still_computes_from_any_price(self):
+    The moving averages, the ATR and the distance levels remain valid technical
+    data — what they must not do is stand in for a spot price. These tests
+    assert the second half: the indicator inputs themselves still reach the
+    metrics that consume them, so the fix did not amputate the technical layer
+    along with the defect.
+    """
+
+    def test_the_moving_averages_are_still_available_as_levels(self):
+        """SMA50 and SMA200 remain readable inputs, whatever the price is."""
+        from tradingagents.dataflows.math.price_source import indicator_as_price
+        from tradingagents.dataflows.math.run_registry import (
+            RunInputs,
+        )
+
+        inputs = RunInputs(
+            price=INDICATOR_PRICE, previous_close=520.0,
+            sma50=INDICATOR_PRICE, sma200=500.0, period_high=560.0,
+            price_provenance=indicator_as_price("sma50", INDICATOR_PRICE, "AAPL"),
+        )
+        assert inputs.sma50 == INDICATOR_PRICE
+        assert inputs.sma200 == 500.0
+        assert inputs.period_high == 560.0
+
+    def test_a_qualified_price_restores_every_price_derived_metric(self):
+        """The refuse is about the numerator, not about the formula."""
+        from tradingagents.dataflows.math.price_source import qualified_price
+        from tradingagents.dataflows.math.run_registry import (
+            RunInputs,
+            build_run_registry,
+        )
+
+        registry = build_run_registry(
+            RunInputs(
+                price=INDICATOR_PRICE, previous_close=520.0,
+                sma50=INDICATOR_PRICE, sma200=500.0, period_high=560.0,
+                price_provenance=qualified_price(
+                    "AAPL", INDICATOR_PRICE, bar_finality="EOD_CONFIRMED"),
+            ),
+            run_id="fix3-qualified-levels",
+        )
+        for name in ("session_return", "distance_from_sma50",
+                     "distance_from_sma200", "distance_from_high"):
+            record = registry.get(name)
+            assert record is not None, name
+            assert record.is_usable is True, f"{name}: {record.reason}"
+            assert record.value is not None, name
+
+    def test_eps_reconciliation_is_independent_of_the_price(self):
+        """The GAAP EPS divides net income by shares; no price is involved."""
         from tradingagents.dataflows.math.price_source import indicator_as_price
         from tradingagents.dataflows.math.run_registry import (
             RunInputs,
@@ -194,15 +242,33 @@ class TestNoCollateralDamage:
         )
 
         registry = build_run_registry(
-            RunInputs(price=INDICATOR_PRICE,
-                      price_provenance=indicator_as_price("sma50", INDICATOR_PRICE, "AAPL"),
-                      previous_close=520.0),
-            run_id="fix3-return")
-        record = registry.get("session_return")
-        assert record is not None
-        assert record.value is not None, "a return is a level comparison, not a valuation"
+            RunInputs(
+                price=INDICATOR_PRICE,
+                price_provenance=indicator_as_price("sma50", INDICATOR_PRICE, "AAPL"),
+                eps_ttm=EPS_TTM, weighted_average_shares=WEIGHTED_SHARES,
+            ),
+            run_id="fix3-eps",
+        )
+        assert registry.get("eps_gaap").is_usable is True
 
-    def test_distance_from_a_moving_average_is_still_a_level_comparison(self):
+
+class TestAPriceDerivedMetricNeedsAMarketPrice:
+    """`session_return` and the distances are price-derived, so they need a price.
+
+    A return is the change in a *security's* price between two sessions; a
+    distance is how far that price sits from a level. Feeding either an
+    indicator produces a number that looks like market information and is not:
+    "the stock rose 0.56%" computed from a moving average is a fabricated
+    observation. These metrics take the same numerator rule as the multiples.
+    """
+
+    @pytest.mark.parametrize("metric", [
+        "session_return",
+        "distance_from_sma50",
+        "distance_from_sma200",
+        "distance_from_high",
+    ])
+    def test_an_indicator_is_not_a_price_for_them(self, metric):
         from tradingagents.dataflows.math.price_source import indicator_as_price
         from tradingagents.dataflows.math.run_registry import (
             RunInputs,
@@ -210,12 +276,100 @@ class TestNoCollateralDamage:
         )
 
         registry = build_run_registry(
-            RunInputs(price=INDICATOR_PRICE, sma200=500.0,
-                      price_provenance=indicator_as_price("sma50", INDICATOR_PRICE, "AAPL")),
-            run_id="fix3-distance")
-        record = registry.get("distance_from_sma200")
+            RunInputs(
+                price=INDICATOR_PRICE, previous_close=520.0,
+                sma50=INDICATOR_PRICE, sma200=500.0, period_high=560.0,
+                price_provenance=indicator_as_price("sma50", INDICATOR_PRICE, "AAPL"),
+            ),
+            run_id=f"fix3-ind-{metric}",
+        )
+        record = registry.get(metric)
         assert record is not None
-        assert record.value is not None
+        assert record.value is None, f"{metric} published a number from an indicator"
+        assert record.is_usable is False
+        assert record.calculation_status is CalculationStatus.REFUSED
+        assert "price" in record.reason.lower()
+
+    @pytest.mark.parametrize("metric", [
+        "session_return",
+        "distance_from_sma50",
+        "distance_from_sma200",
+        "distance_from_high",
+    ])
+    def test_a_price_without_provenance_is_refused(self, metric):
+        from tradingagents.dataflows.math.run_registry import (
+            RunInputs,
+            build_run_registry,
+        )
+
+        registry = build_run_registry(
+            RunInputs(price=INDICATOR_PRICE, previous_close=520.0,
+                      sma50=INDICATOR_PRICE, sma200=500.0, period_high=560.0),
+            run_id=f"fix3-noprov-{metric}",
+        )
+        record = registry.get(metric)
+        assert record.is_usable is False
+        assert record.calculation_status is CalculationStatus.REFUSED
+
+    def test_an_absent_price_is_a_gap_not_a_refusal(self):
+        """No price at all stays NOT_COMPUTABLE: nothing was offered to refuse."""
+        from tradingagents.dataflows.math.run_registry import (
+            RunInputs,
+            build_run_registry,
+        )
+
+        registry = build_run_registry(
+            RunInputs(previous_close=520.0, sma50=545.10, sma200=502.85,
+                      period_high=812.35),
+            run_id="fix3-absent",
+        )
+        for name in ("session_return", "distance_from_sma50",
+                     "distance_from_sma200", "distance_from_high"):
+            record = registry.get(name)
+            assert record is not None, name
+            assert record.calculation_status is CalculationStatus.NOT_COMPUTABLE, (
+                f"{name}: an absent price is a gap, not a contradiction")
+            assert record.is_usable is False
+
+    def test_they_join_the_blocking_set(self):
+        """A fabricated observation must stop an executable decision."""
+        from tradingagents.dataflows.math.price_source import indicator_as_price
+        from tradingagents.dataflows.math.run_registry import (
+            RunInputs,
+            build_run_registry,
+        )
+
+        registry = build_run_registry(
+            RunInputs(price=INDICATOR_PRICE, previous_close=520.0,
+                      sma50=INDICATOR_PRICE, sma200=500.0, period_high=560.0,
+                      price_provenance=indicator_as_price(
+                          "sma50", INDICATOR_PRICE, "AAPL")),
+            run_id="fix3-blocking",
+        )
+        blocking = {r.metric for r in registry.blocking}
+        assert {"session_return", "distance_from_sma50",
+                "distance_from_sma200", "distance_from_high"} <= blocking
+
+    def test_the_table_reports_the_refusal_not_the_number(self):
+        from tradingagents.dataflows.certified_report import render_metric_table
+        from tradingagents.dataflows.math.price_source import indicator_as_price
+        from tradingagents.dataflows.math.run_registry import (
+            RunInputs,
+            build_run_registry,
+        )
+
+        registry = build_run_registry(
+            RunInputs(price=INDICATOR_PRICE, previous_close=520.0,
+                      sma50=INDICATOR_PRICE, sma200=500.0, period_high=560.0,
+                      price_provenance=indicator_as_price(
+                          "sma50", INDICATOR_PRICE, "AAPL")),
+            run_id="fix3-table",
+        )
+        table = render_metric_table(registry)
+        row = next(line for line in table.splitlines()
+                   if line.startswith("| `session_return`"))
+        assert "refused" in row
+        assert "certified" not in row
 
 
 class TestFix2AndFix1AreUntouched:
