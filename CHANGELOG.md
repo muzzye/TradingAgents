@@ -19,6 +19,42 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.23] — 2026-11-10
+
+### Added
+
+- **The numeric claims validator now reads a trailing P/E.** FIX #3 removed the
+  certified figure an indicator-derived P/E could rest on and recorded the
+  remaining gap: the claims parser matched `P/B` and never `P/E`. A registry
+  holding `pe_trailing = 25.4 VERIFIED` therefore produced
+  `claims_extracted=0` for a report stating `Trailing P/E 18.2x`, and no finding
+  was raised. (The reproduction used 50.8 / 2.0 = 25.4 to keep the arithmetic
+  obvious; the tolerance correction below was found on a value that does not
+  round cleanly, 50.875 / 2.0 = 25.4375.) The parser now recognises the label in
+  English and Italian
+  (`Trailing P/E of 25.4x`, `P/E trailing pari a 25,4`,
+  `Price-to-Earnings ratio of 25.4`, and `PER` only when the surrounding text
+  names the multiple), in both decimal conventions, and compares the claim
+  against the engine's own `pe_trailing` through the existing `check_claim`
+  path — no second validation system.
+
+  A **forward** multiple (`Forward P/E of 18.2x`, `P/E atteso`) and one
+  qualified by another period (`Historical P/E`, `the 2024 P/E`, `FY2024`) are
+  deliberately not read as the current trailing claim: the engine does not
+  certify a forward P/E at all, so comparing one to the trailing value would
+  invent a contradiction out of a correct statement.
+
+### Fixed
+
+- **A multiple's tolerance now scales with its magnitude.** `MULTIPLE_TOLERANCE`
+  was a flat 0.02, calibrated for a P/B near 1.6. Applied to a P/E near 25 it
+  rejected a report that rounded 25.4375 to the correct 25.4 — a 0.15%
+  difference, and no contradiction. The permitted difference is now
+  `max(0.02, 1% of the computed value)`: small multiples keep the tight check
+  they need, large ones get the tolerance their own rounding requires. One
+  percent cannot hide a material error — 18.2 against 25.4 is 28% off and still
+  blocks.
+
 ## [0.8.22] — 2026-11-10
 
 ### Fixed

@@ -74,6 +74,23 @@ class ClaimVerdict(StrEnum):
 PCT_TOLERANCE = Decimal("0.1")
 # Default tolerance for a multiple (1.35 vs 1.4801 is far beyond).
 MULTIPLE_TOLERANCE = Decimal("0.02")
+# FIX #4: a multiple's tolerance must scale with its magnitude. An absolute
+# 0.02 is calibrated for a P/B near 1.6, where it allows a two-decimal
+# rounding. Applied to a P/E near 25 it rejects a report that rounds 25.4375
+# to the correct 25.4 — a difference of 0.0375, which is 0.15% and no
+# contradiction at all. The rule is therefore "absolute floor OR one percent",
+# whichever is larger: small multiples keep the tight check they need, large
+# ones get the tolerance their own rounding requires. One percent cannot hide a
+# materially wrong figure — 18.2 against 25.4 is 28% off.
+_MULTIPLE_RELATIVE_TOLERANCE = Decimal("0.01")
+
+
+def _multiple_tolerance(computed: Decimal | None) -> Decimal:
+    """The permitted absolute difference for a multiple of this magnitude."""
+    if computed is None:
+        return MULTIPLE_TOLERANCE
+    return max(MULTIPLE_TOLERANCE,
+               abs(computed) * _MULTIPLE_RELATIVE_TOLERANCE)
 
 
 @dataclass(frozen=True)
@@ -159,7 +176,7 @@ def check_claim(claim: NumericClaim, computed: Any, *,
     claimed_d = as_decimal(claim.value)
     is_pct = claim.unit in ("percent", "percentage_points")
     tol = (as_decimal(tolerance) if tolerance is not None
-           else (PCT_TOLERANCE if is_pct else MULTIPLE_TOLERANCE))
+           else (PCT_TOLERANCE if is_pct else _multiple_tolerance(computed_d)))
     quantum = PERCENT_QUANTUM if is_pct else RATIO_QUANTUM
 
     if computed_d is None or claimed_d is None:
@@ -246,6 +263,32 @@ _CLAIM_PATTERNS: tuple[tuple[str, re.Pattern[str], str, int], ...] = (
     ("price_to_book",
      re.compile(r"P/?B[^.\d,]{0,20}(\d+(?:[.,]\d+)?)\s*x?", re.IGNORECASE),
      "multiple", 1),
+    # FIX #4: a trailing P/E. The label must appear and the figure must be the
+    # *current trailing* multiple — not a forward one, and not one qualified by
+    # another period. Both are checked by `_pe_claim_value` on the matched text
+    # rather than by lookarounds, because "forward" may precede or follow the
+    # label ("Forward P/E of 18.2x", "P/E forward 18,2x") and a single regular
+    # expression covering both orders became unreadable and untestable.
+    ("pe_trailing",
+     re.compile(
+         r"(?:trailing\s+P/?E"
+         r"|P/?E\s+trailing"
+         r"|P/?E\s+ratio"
+         r"|Price[-\s]to[-\s]Earnings(?:\s+ratio)?"
+         r"|(?<![A-Za-z])P/?E(?![A-Za-z]))"
+         r"[^.\d\n%]{0,24}?(\d+(?:[.,]\d+)?)\s*x?",
+         re.IGNORECASE), "multiple", 1),
+    # `PER` is the Italian and Spanish abbreviation but also an ordinary word
+    # fragment, so it is only read as a multiple when the surrounding text names
+    # the multiple ("PER del multiplo 25,4"). Ambiguity resolves to *not* a
+    # claim, which is the safe direction: an unextracted claim is never
+    # verified, and a false positive would invent a contradiction.
+    ("pe_trailing",
+     re.compile(
+         r"\bPER\b(?=[^.\d\n]{0,30}?\b(?:multiplo|rapporto|ratio|dell['’]?"
+         r"utile|prezzo[-\s]utili)\b)"
+         r"[^.\d\n%]{0,30}?(\d+(?:[.,]\d+)?)\s*x?",
+         re.IGNORECASE), "multiple", 1),
     ("stop_atr",
      re.compile(r"(\d+(?:\.\d+)?)\s*(?:x\s*)?ATR[s]?\b", re.IGNORECASE), "multiple", 1),
     ("risk_reward",
@@ -269,6 +312,44 @@ _CLAIM_PATTERNS: tuple[tuple[str, re.Pattern[str], str, int], ...] = (
          re.IGNORECASE), "percent", -1),
 )
 
+# FIX #4: a P/E claim is only comparable to `pe_trailing` when it describes the
+# same thing. Two exclusions, applied to the matched sentence rather than to the
+# pattern, because the qualifier may sit on either side of the label:
+#
+# - a *forward* multiple is a different metric the engine does not certify at
+#   all, so comparing it to the trailing value would manufacture a contradiction
+#   out of a correct statement;
+# - a P/E qualified by another period ("the 2024 P/E", "FY2025") is a historical
+#   figure, and the engine's value is the current one.
+#
+# Both resolve to "not a claim", which is the fail-closed direction: an
+# unextracted claim is never verified, whereas a false MISMATCH blocks a run
+# that said nothing wrong.
+_PE_FORWARD = re.compile(
+    r"\bforward\b|\batteso\b|\bprevisto\b|\bexpected\b|\bestimat\w*|\bprospett\w*|"
+    r"\bnext\s+(?:year|fiscal|quarter)\b|\bFY\s*20\d\d\b",
+    re.IGNORECASE)
+_PE_HISTORICAL = re.compile(
+    r"\bhistor\w*|\bstoric\w*|\bFY\s*(?:19|20)\d\d\b|\b(?:19|20)\d\d\b|"
+    r"\bpast\b|\bprevious\b|\bprecedente\b|\banno\s+scorso\b",
+    re.IGNORECASE)
+
+
+def _pe_window(text: str, start: int, end: int) -> str:
+    """The sentence fragment around a P/E match, for the qualifier checks."""
+    left = max(0, text.rfind(".", 0, start) + 1, text.rfind("\n", 0, start) + 1)
+    stops = [i for i in (text.find(".", end), text.find("\n", end),
+                         text.find(";", end), text.find(",", end)) if i != -1]
+    right = min(stops) if stops else len(text)
+    return text[left:right]
+
+
+def _pe_claim_value(text: str, match: re.Match[str]) -> str | None:
+    """The claimed figure, or ``None`` when the claim is not the trailing one."""
+    window = _pe_window(text, match.start(), match.end())
+    if _PE_FORWARD.search(window) or _PE_HISTORICAL.search(window):
+        return None
+    return match.group(1)
 
 
 def _decimal_claim(raw: str | None) -> Decimal | None:
@@ -309,6 +390,10 @@ def extract_claims(text: str | None, agent: str = "unknown") -> list[NumericClai
                 # Alternation pattern: whichever branch captured wins.
                 raw = next((g for g in match.groups() if g is not None), None)
                 value = as_decimal(raw)
+            elif label == "pe_trailing":
+                # FIX #4: a forward or historical multiple is a different claim
+                # and must not be judged against the current trailing metric.
+                value = _decimal_claim(_pe_claim_value(text, match))
             else:
                 value = _decimal_claim(match.group(value_group))
             if value is None:
