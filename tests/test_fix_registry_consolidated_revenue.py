@@ -390,3 +390,197 @@ class TestT12RealPayload:
                    if "consolidated_revenue" in line)
         assert "certified" in row
         assert "105647" in row
+
+
+# ===========================================================================
+# FIX #1 revision — Problem A: the compiled graph must keep the state keys
+# ===========================================================================
+def _compiled_graph(sec_payload=None, report="Q3 2026 total revenue 105,647 million USD."):
+    """A real `StateGraph(AgentState)`, not a dict merge.
+
+    The defect Problem A describes is that LangGraph keeps only the keys its
+    schema declares, so a node's extra keys vanish between nodes. Only a
+    compiled graph can show that: `{**state, **out}` cannot.
+    """
+    from langgraph.graph import END, StateGraph
+
+    from tradingagents.agents.state import AgentState
+    from tradingagents.graph.data_quality_node import create_data_quality_check
+
+    payload = dict(F.BOTH_SCOPES) if sec_payload is None else sec_payload
+    node = create_data_quality_check(
+        filings_provider=lambda t, d: [],
+        sec_facts_provider=lambda t, d: payload,
+    )
+
+    graph = StateGraph(AgentState)
+    graph.add_node("dq", node)
+    graph.add_node("analyst", lambda s: {"fundamentals_report": report})
+    graph.set_entry_point("dq")
+    graph.add_edge("dq", "analyst")
+    graph.add_edge("analyst", END)
+    return graph.compile()
+
+
+def _graph_state(sec_payload=None, report="Q3 2026 total revenue 105,647 million USD."):
+    return _compiled_graph(sec_payload, report).invoke({
+        "company_of_interest": "BRK-B",
+        "trade_date": F.ANALYSIS_DATE,
+        "messages": [],
+        "fundamentals_report": "",
+    })
+
+
+class TestACompiledGraphKeepsState:
+    def test_a_revenue_consolidated_survives_the_graph(self):
+        state = _graph_state()
+        assert "revenue_consolidated" in state, (
+            "the compiled graph dropped it: AgentState must declare the key")
+        assert state["revenue_consolidated"] == EXPECTED
+
+    def test_b_prior_and_provenance_survive_the_graph(self):
+        state = _graph_state()
+        assert state.get("revenue_prior") == F.REVENUE_Q3_2025
+        provenance = state.get("revenue_provenance")
+        assert isinstance(provenance, dict)
+        assert provenance["concept"] == "Revenues"
+        assert provenance["period_end"] == "2026-09-30"
+        assert provenance["validation_status"] == "VERIFIED"
+
+    def test_c_the_registry_is_built_from_the_graphs_own_state(self):
+        from tradingagents.dataflows.math.extraction import extract_run_inputs
+        from tradingagents.dataflows.math.run_registry import (
+            build_run_registry,
+            registry_inputs_from_state,
+        )
+        from tradingagents.graph.trading_graph import _merge_extracted
+
+        state = _graph_state()
+        merged = _merge_extracted(registry_inputs_from_state(state),
+                                  extract_run_inputs(state).inputs)
+        registry = build_run_registry(merged, run_id="graph")
+        metric = registry.get("consolidated_revenue")
+        assert metric.value == EXPECTED
+        assert metric.period_end == "2026-09-30"
+        assert metric.is_usable is True
+
+
+# ===========================================================================
+# Problem B — SEC_VERIFIED outranks LLM_EXTRACTED for consolidated_revenue
+# ===========================================================================
+def _merge_and_certify(state: dict):
+    from tradingagents.dataflows.math.extraction import extract_run_inputs
+    from tradingagents.dataflows.math.run_registry import (
+        build_run_registry,
+        registry_inputs_from_state,
+    )
+    from tradingagents.graph.trading_graph import _merge_extracted
+
+    merged = _merge_extracted(registry_inputs_from_state(state),
+                              extract_run_inputs(state).inputs)
+    return merged, build_run_registry(merged, run_id="merge")
+
+
+def _sec_state(report: str, *, provenance=None, value=EXPECTED) -> dict:
+    from tradingagents.dataflows.math.sec_revenue_inputs import (
+        revenue_inputs_from_sec,
+    )
+
+    sec = revenue_inputs_from_sec(dict(F.BOTH_SCOPES), F.ANALYSIS_DATE,
+                                  cik=F.CIK)
+    if provenance is None:
+        provenance = sec.revenue_provenance
+    return {
+        "company_of_interest": "BRK-B", "trade_date": F.ANALYSIS_DATE,
+        "verified_market_snapshot": {},
+        "revenue_consolidated": value,
+        "revenue_prior": sec.revenue_prior,
+        "revenue_provenance": provenance,
+        "fundamentals_report": report,
+    }
+
+
+class TestBPrecedence:
+    def test_d_sec_verified_wins_over_a_report_stating_the_same_figure(self):
+        """D: the report restates the filing; the filing is the fact."""
+        merged, registry = _merge_and_certify(
+            _sec_state("Q3 2026 total revenue 105,647 million USD."))
+        metric = registry.get("consolidated_revenue")
+        assert metric.value == EXPECTED
+        assert metric.source_status.value == "VERIFIED"
+        assert metric.is_usable is True
+        assert "revenue_consolidated" not in merged.claimed_inputs
+
+    def test_e_prose_alone_is_not_certified(self):
+        """E: no SEC provenance means no certification."""
+        state = {"company_of_interest": "BRK-B", "trade_date": F.ANALYSIS_DATE,
+                 "verified_market_snapshot": {},
+                 "fundamentals_report": "Q3 2026 total revenue 105,647 million USD."}
+        _, registry = _merge_and_certify(state)
+        metric = registry.get("consolidated_revenue")
+        assert metric.is_usable is False
+        assert metric.source_status.value == "LLM_CLAIMED"
+
+    def test_f_an_unavailable_source_certifies_no_text_fallback(self):
+        """F: SEC down, the report still states a figure — still not certified."""
+        state = _graph_state(sec_payload={})
+        assert "revenue_consolidated" not in state
+        _, registry = _merge_and_certify(
+            {**state, "fundamentals_report": "total revenue 105,647 million",
+             "verified_market_snapshot": {}})
+        assert registry.get("consolidated_revenue").is_usable is False
+
+    def test_g_contract_revenue_alone_certifies_no_consolidated_total(self):
+        """G: the component is filed and the report calls it revenue."""
+        state = _graph_state(sec_payload=dict(F.ONLY_CONTRACT))
+        merged, registry = _merge_and_certify(
+            {**state, "fundamentals_report": "total revenue 74,322 million",
+             "verified_market_snapshot": {}})
+        metric = registry.get("consolidated_revenue")
+        assert metric.value != COMPONENT or metric.is_usable is False
+        assert metric.is_usable is False
+        assert "revenue_consolidated" in (merged.claimed_inputs or ())
+
+    def test_h_a_conflicting_report_keeps_the_filing_and_records_it(self):
+        """H: the report says 74.3bn, the filing says 105,647 — the filing wins."""
+        merged, registry = _merge_and_certify(
+            _sec_state("Revenue came to 74.3 billion this quarter."))
+        metric = registry.get("consolidated_revenue")
+        assert metric.value == EXPECTED, "the LLM figure must not replace the fact"
+        assert metric.source_status.value == "VERIFIED"
+        assert metric.is_usable is True
+        # The claim is not silently dropped: the report's own figure is still
+        # visible to the claims validator through the reports it reads.
+        assert registry.get("revenue_growth").is_usable is True
+
+    def test_an_unverified_provenance_keeps_the_claim_classification(self):
+        """The precedence only applies to a *verified* SEC provenance."""
+        provenance = {"concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
+                      "validation_status": "UNVERIFIED", "period_end": "2026-09-30"}
+        merged, registry = _merge_and_certify(
+            _sec_state("Q3 2026 total revenue 105,647 million USD.",
+                       provenance=provenance, value=COMPONENT))
+        metric = registry.get("consolidated_revenue")
+        assert metric.is_usable is False
+        assert metric.source_status.value == "LLM_CLAIMED"
+
+
+# ===========================================================================
+# I — the rest is untouched
+# ===========================================================================
+class TestINoRegression:
+    def test_other_metrics_keep_their_own_classification(self):
+        """The precedence is scoped: a claimed P/B stays claimed."""
+        state = _sec_state("Book value per share 359.56 and P/B 1.73x.")
+        merged, registry = _merge_and_certify(state)
+        # P/B is not in the precedence list, so a prose figure remains a claim.
+        assert "book_value_per_share" in (merged.claimed_inputs or ()) or \
+               registry.get("price_to_book").is_usable is False
+
+    def test_the_gate_still_blocks_without_a_portfolio(self):
+        from tradingagents.dataflows.gate_integration import evaluate_decision
+
+        state = _graph_state()
+        _, decision = evaluate_decision(
+            "BRK-B", F.ANALYSIS_DATE, state, snapshot_id="i", trigger_met=True)
+        assert decision.creates_order is False

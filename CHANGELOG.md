@@ -19,6 +19,27 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.9] — 2026-11-10
+
+### Fixed
+
+- **The SEC revenue reaches the registry through the compiled graph.** The
+  Data Quality Check node published `revenue_consolidated`, `revenue_prior` and
+  `revenue_provenance`, but `AgentState` did not declare them — and
+  `StateGraph(AgentState)` keeps only the keys its schema names, so every one of
+  them was dropped between nodes. The metric stayed `NOT_COMPUTABLE` even with a
+  valid filing. All three are now declared on the state.
+- **A verified SEC figure no longer becomes a claim because a report mentions
+  it.** `_merge_extracted` unioned `claimed_inputs` unconditionally, so a
+  fundamentals report that restated the same revenue marked
+  `revenue_consolidated` as model-asserted and the metric fell from `VERIFIED`
+  to `LLM_CLAIMED`. The merge now recognises a field whose structured provenance
+  says `VERIFIED` and leaves it out of `claimed_inputs`. The precedence is
+  scoped to `consolidated_revenue` only — it is an exception for a source the
+  filing states authoritatively, not a general rule — and it applies only with a
+  complete, verified provenance: an `UNVERIFIED` concept keeps the claim
+  classification.
+
 ## [0.8.8] — 2026-11-10
 
 ### Fixed
