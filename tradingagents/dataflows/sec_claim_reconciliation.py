@@ -57,11 +57,22 @@ _COMPONENT_MARKERS = re.compile(
 )
 
 # Words that place the figure in a different period than the analysis.
-_HISTORICAL_MARKERS = re.compile(
+# Words that place a figure in a period the analysis is not about, without
+# naming the year: "prior year", "last year", "a year ago". The year itself is
+# never hardcoded — a static list is wrong the moment the clock moves past it,
+# and it silently stops recognising anything newer. A *named* period (Q3 2025,
+# FY2024, "trimestre del 2024") is read and compared arithmetically instead.
+_HISTORICAL_WORDS = re.compile(
     r"(prior\s+year|last\s+year|previous\s+year|year[- ]ago"
-    r"|(?:q[1-4]|fy)\s*20(?:1\d|2[0-4])"
-    r"|anno\s+precedente|esercizio\s+precedente|anno\s+scorso"
-    r"|(?:il\s+)?(?:trimestre|q[1-4])\s+(?:del\s+)?20(?:1\d|2[0-4]))",
+    r"|anno\s+precedente|esercizio\s+precedente|anno\s+scorso)",
+    re.IGNORECASE,
+)
+
+# A period a sentence names: a quarter, a fiscal year, or a bare year, in the
+# spellings the reports and their tables use.
+_NAMED_PERIOD = re.compile(
+    r"\b(?:q([1-4])\s*[/-]?\s*(\d{4})|(\d{4})\s*[/-]?\s*q([1-4])"
+    r"|(fy)\s*(\d{4})|(\d{4}))\b",
     re.IGNORECASE,
 )
 
@@ -211,6 +222,77 @@ def _certified_revenue(registry: Any):
     return record
 
 
+def _certified_period(record) -> tuple[int | None, int | None]:
+    """The quarter and year the certified figure belongs to.
+
+    Read from the record's own `period_end`, so the comparison follows the
+    MetricRecord rather than a list of years someone has to maintain. A record
+    with no period yields ``(None, None)``, and every named period is then
+    treated as comparable — the metric's own period is stated in the finding, so
+    a reader can judge it.
+    """
+    end = getattr(record, "period_end", None)
+    if not isinstance(end, str) or len(end) < 7:
+        return None, None
+    try:
+        year = int(end[:4])
+        month = int(end[5:7])
+    except ValueError:
+        return None, None
+    # A fiscal quarter ends in month 3, 6, 9 or 12; anything else is an annual
+    # or off-cycle period whose quarter is not derivable.
+    quarter = (month + 2) // 3 if month in (3, 6, 9, 12) else None
+    return quarter, year
+
+
+def _named_period(context: str) -> tuple[int | None, int | None, bool]:
+    """The (quarter, year, explicit) a sentence names, or all-None.
+
+    ``explicit`` says whether the sentence named a period at all: a figure with
+    no period beside it is a claim on the current one, and is still checked —
+    that is the case the check exists for.
+    """
+    match = _NAMED_PERIOD.search(context)
+    if not match:
+        return None, None, False
+    quarter = match.group(1) or match.group(4)
+    year = match.group(2) or match.group(3) or match.group(6) or match.group(7)
+    return (int(quarter) if quarter else None,
+            int(year) if year else None,
+            True)
+
+
+def _period_is_comparable(context: str, record) -> bool:
+    """Whether a figure stated in ``context`` is about the certified period.
+
+    Three outcomes, and the middle one is why this is arithmetic rather than a
+    word list:
+
+    - the sentence names no period → the figure is a claim on the current one,
+      so it is compared (a report that omits the quarter is still talking about
+      it);
+    - the sentence names the certified period → compared;
+    - the sentence names a different period → not compared. A correct prior-year
+      figure must not be reported as contradicting this year's.
+    """
+    if _HISTORICAL_WORDS.search(context):
+        return False
+
+    claimed_quarter, claimed_year, explicit = _named_period(context)
+    if not explicit:
+        return True
+
+    certified_quarter, certified_year = _certified_period(record)
+    if certified_year is None:
+        # No certified period to compare against; the finding records whichever
+        # period the report named, so nothing is hidden.
+        return True
+    if claimed_year is not None and claimed_year != certified_year:
+        return False
+    return not (claimed_quarter is not None and certified_quarter is not None
+                and claimed_quarter != certified_quarter)
+
+
 def reconcile_revenue_claims(registry: Any, reports: dict[str, str | None],
                              *, tolerance_pct: float = 0.5) -> list[RevenueClaimFinding]:
     """Findings for every report that contradicts the certified revenue.
@@ -245,7 +327,7 @@ def reconcile_revenue_claims(registry: Any, reports: dict[str, str | None],
             context = text[max(0, match.start() - 120):match.end()]
             if _COMPONENT_MARKERS.search(context):
                 continue
-            if _HISTORICAL_MARKERS.search(context):
+            if not _period_is_comparable(context, record):
                 continue
             claimed = _scale_value(match.group(1), match.group(2))
             if claimed is None:

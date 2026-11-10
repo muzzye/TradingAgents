@@ -19,6 +19,23 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.12] — 2026-11-10
+
+### Fixed
+
+- **A correct prior-year revenue figure is no longer reported as a
+  contradiction.** The check excluded historical figures with a regex ending at
+  2024 (`20(?:1\d|2[0-4])`), so a report stating `Ricavi consolidati Q3 2025:
+  94.972 milioni` — accurate and correctly labelled — produced a false
+  `SEC_REVENUE_CLAIM_MISMATCH` against the certified Q3 2026 value. The period
+  is now read from the `MetricRecord`'s own `period_end` and compared
+  arithmetically with the period the sentence names, so no year is hardcoded and
+  nothing falls off the end of a list as the clock moves on. A figure with no
+  period beside it is still a claim on the current one and is still checked; a
+  figure naming another year or another quarter is not compared. The
+  spellings covered are `Q3 2025`, `2025-Q3`, `FY2025`, `Q3/2025`, a Markdown table row
+  and the Italian "anno precedente".
+
 ## [0.8.11] — 2026-11-10
 
 ### Fixed

@@ -407,3 +407,73 @@ class TestStructuredPersistence:
         metric = registry.get("consolidated_revenue")
         assert metric.value == EXPECTED
         assert metric.is_usable is True
+
+
+# ===========================================================================
+# Fiscal period — a prior-year figure is not a contradiction
+# ===========================================================================
+class TestFiscalPeriod:
+    """The certified period decides which figures are comparable.
+
+    The recogniser used to exclude historical figures with a regex that ended
+    at 2024, so `Q3 2025: 94.972 milioni` — a *correct* prior-year statement —
+    was reported as contradicting the certified Q3 2026 metric. The period is
+    now read from the record and compared arithmetically, so no year is ever
+    hardcoded and nothing falls off the end of a list.
+    """
+
+    def test_a_correct_prior_year_figure_is_not_a_contradiction(self):
+        findings = _reconcile("Ricavi consolidati Q3 2025: 94.972 milioni USD")
+        assert findings == [], "a prior-year figure must not contradict this year"
+
+    def test_the_same_figure_stated_for_the_certified_period_is_one(self):
+        findings = _reconcile("Ricavi consolidati Q3 2026: 74.322 milioni USD")
+        assert len(findings) == 1
+        assert findings[0].claimed_value == COMPONENT
+
+    def test_an_implicit_period_is_still_checked(self):
+        """No period named means the current one — the case the check exists for."""
+        findings = _reconcile("Ricavi consolidati: 74.322 milioni USD")
+        assert len(findings) == 1
+
+    def test_a_different_quarter_of_the_same_year_is_not_compared(self):
+        findings = _reconcile("Ricavi consolidati Q2 2026: 74.322 milioni USD")
+        assert findings == []
+
+    @pytest.mark.parametrize("text", [
+        "| Ricavi consolidati | Q3 2025 | 94.972 | mln |",
+        "Ricavi consolidati 2025-Q3: 94.972 milioni",
+        "Ricavi consolidati FY2025: 94.972 milioni",
+        "Ricavi consolidati dell'anno precedente: 94.972 milioni",
+    ])
+    def test_the_period_spellings_the_reports_use_are_understood(self, text):
+        assert _reconcile(text) == []
+
+    @pytest.mark.parametrize("text", [
+        "| Ricavi consolidati | Q3 2026 | 74.322 | mln |",
+        "Ricavi consolidati 2026-Q3: 74.322 milioni",
+    ])
+    def test_the_certified_period_is_recognised_in_every_spelling(self, text):
+        assert len(_reconcile(text)) == 1
+
+    def test_the_period_comes_from_the_record_not_a_list(self):
+        """A future year works without touching the code."""
+        from tradingagents.dataflows.math.run_registry import RunInputs, build_run_registry
+
+        registry = build_run_registry(
+            RunInputs(revenue_consolidated=200_000_000_000.0,
+                      revenue_prior=180_000_000_000.0,
+                      revenue_provenance={
+                          "concept": "Revenues", "validation_status": "VERIFIED",
+                          "period_end": "2028-09-30", "accession": "future"}),
+            run_id="future")
+        # The metric must be usable for the check to run at all.
+        if not registry.get("consolidated_revenue").is_usable:
+            pytest.skip("the registry refused this synthetic record")
+
+        # 2027 is the prior year for 2028 — excluded without any code change.
+        assert _reconcile("Ricavi consolidati Q3 2027: 74.322 milioni",
+                          registry) == []
+        # 2028 is the certified year — compared.
+        assert len(_reconcile("Ricavi consolidati Q3 2028: 74.322 milioni",
+                              registry)) == 1
