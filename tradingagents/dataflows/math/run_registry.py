@@ -54,6 +54,12 @@ class RunInputs:
     book_value_per_share: float | None = None
     revenue_consolidated: float | None = None
     revenue_prior: float | None = None
+    # Where the revenue figure came from, when it came from a filing rather than
+    # from a report sentence (§2 of P2). A `Revenues` fact carrying its concept,
+    # accession and period is a certified number; a figure read out of an
+    # analyst's prose is a claim. Without this the two looked identical in the
+    # registry, which is how an unverified revenue could be quoted as certified.
+    revenue_provenance: dict | None = None
     # Dual-class valuation inputs (§3 of P3). A company with two share classes
     # needs all of these before a P/B can be computed: the equity, both share
     # counts, the conversion ratio and the class the price belongs to.
@@ -106,6 +112,21 @@ def _source_of(inputs: RunInputs, *names: str) -> SourceStatus:
     if set(inputs.claimed_inputs).intersection(names):
         return SourceStatus.LLM_CLAIMED
     return SourceStatus.VERIFIED
+
+
+def _revenue_source_of(inputs: RunInputs) -> SourceStatus:
+    """The revenue's source, refusing a figure the filing does not certify.
+
+    A revenue value can arrive with its XBRL provenance (§2 of P2). When that
+    provenance says ``UNVERIFIED`` — the concept measured a subset, or was
+    dimensioned to one segment — the number is a *component*, whatever it is
+    called, and certifying it is exactly the F1 defect. The value stays in the
+    registry so the audit can show it; ``is_usable`` is what refuses it.
+    """
+    provenance = inputs.revenue_provenance or {}
+    if provenance.get("validation_status") == "UNVERIFIED":
+        return SourceStatus.LLM_CLAIMED
+    return _source_of(inputs, "revenue_consolidated")
 
 
 def build_run_registry(inputs: RunInputs, *, run_id: str = "") -> MetricRegistry:
@@ -173,6 +194,18 @@ def build_run_registry(inputs: RunInputs, *, run_id: str = "") -> MetricRegistry
         source_status=_source_of(inputs, "eps_ttm", "eps_forward"),
     )
 
+    # §2 of P2: the consolidated revenue, with the filing it came from. A
+    # `Revenues` fact is a certified figure; a number read from a report sentence
+    # is a claim, and the two must not be indistinguishable in the registry.
+    _register_if_computable(
+        registry, "consolidated_revenue", inputs.revenue_consolidated,
+        unit="USD", formula_id="sec_filed_fact",
+        operands={"revenue_provenance": inputs.revenue_provenance},
+        reason="no consolidated revenue was filed or reported",
+        source_status=_revenue_source_of(inputs),
+        period_end=(inputs.revenue_provenance or {}).get("period_end"),
+    )
+
     _register_if_computable(
         registry, "revenue_growth",
         pct_change(inputs.revenue_consolidated, inputs.revenue_prior)
@@ -182,7 +215,7 @@ def build_run_registry(inputs: RunInputs, *, run_id: str = "") -> MetricRegistry
         operands={"revenue": inputs.revenue_consolidated,
                   "revenue_prior": inputs.revenue_prior},
         reason="one of the two revenue figures is unavailable",
-        source_status=_source_of(inputs, "revenue_consolidated", "revenue_prior"),
+        source_status=_revenue_source_of(inputs),
     )
 
     _register_dual_class_valuation(registry, inputs)
@@ -416,6 +449,10 @@ def registry_inputs_from_state(state: dict) -> RunInputs:
         book_value_per_share=_num(state.get("book_value_per_share")),
         revenue_consolidated=_num(state.get("revenue_consolidated")),
         revenue_prior=_num(state.get("revenue_prior")),
+        revenue_provenance=(
+            state.get("revenue_provenance")
+            if isinstance(state.get("revenue_provenance"), dict) else None
+        ),
         # §3 of P3 added these to ``RunInputs`` but nothing ever populated
         # them, so a run that carried the equity and the share counts still
         # produced NOT_COMPUTABLE for every dual-class metric. Reading them
