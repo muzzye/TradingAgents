@@ -23,6 +23,7 @@ metric indistinguishable from one nobody tried, and the audit needs to tell
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from tradingagents.dataflows.math.metric_record import (
@@ -31,6 +32,7 @@ from tradingagents.dataflows.math.metric_record import (
     SourceStatus,
     metric,
 )
+from tradingagents.dataflows.math.precision import PERCENT_QUANTUM, quantize
 from tradingagents.dataflows.math.registry import MetricRegistry
 
 
@@ -60,6 +62,18 @@ class RunInputs:
     # analyst's prose is a claim. Without this the two looked identical in the
     # registry, which is how an unverified revenue could be quoted as certified.
     revenue_provenance: dict | None = None
+    # The accounting period the equity figure belongs to (§2 of P4). A P/B
+    # whose price is from an intraday snapshot and whose book value is from a
+    # quarter five months earlier is not wrong arithmetic — it is two different
+    # moments divided by each other, and the report must be able to say which.
+    equity_period_end: str | None = None
+    # A market capitalisation the report itself states, when it does (§2 of P4).
+    # Kept separate from ``price * shares`` on purpose: the two are the same
+    # number only when the report used the same share count and the same
+    # instant. A report quoting 1,231.44bn while the price implies a different
+    # figure is exactly the disagreement the reconciliation must record rather
+    # than smooth over by recomputing the market cap from the price.
+    market_cap_reported: float | None = None
     # Dual-class valuation inputs (§3 of P3). A company with two share classes
     # needs all of these before a P/B can be computed: the equity, both share
     # counts, the conversion ratio and the class the price belongs to.
@@ -340,7 +354,10 @@ def _register_dual_class_valuation(registry: MetricRegistry,
         ))
 
     if reconciled is not None and not reconciled.is_usable:
-        # The reconciliation refused: record why rather than the number.
+        # The reconciliation refused: record why rather than the number. The
+        # aggregate form and the agreement check still run below — a refused
+        # per-share figure is not a reason to hide the market-cap form, and the
+        # reader needs both to see what disagreed.
         reason = "; ".join(i.message for i in reconciled.issues.issues
                            if i.severity == "error") or "inputs did not reconcile"
         registry.register(metric(
@@ -348,6 +365,8 @@ def _register_dual_class_valuation(registry: MetricRegistry,
             operands={"price": inputs.price, "bvps": per_share_bvps},
             calculation_status=CalculationStatus.REFUSED, reason=reason,
         ))
+        _register_pb_aggregate(registry, inputs, b_equivalent,
+                               per_share_value=pb_per_share)
         return
 
     value = pb_per_share
@@ -370,6 +389,104 @@ def _register_dual_class_valuation(registry: MetricRegistry,
                                  "shares_class_b", "class_a_to_b_ratio"),
     )
 
+    _register_pb_aggregate(registry, inputs, b_equivalent,
+                           per_share_value=value)
+
+
+def _register_pb_aggregate(registry: MetricRegistry, inputs: RunInputs,
+                           b_equivalent: float | None, *,
+                           per_share_value: Any) -> None:
+    """The market-cap form of P/B, and its agreement with the per-share form.
+
+    §2 of P4: two formulas, two metrics. The aggregate form uses the whole
+    company's market cap; the per-share form divides one class's price by that
+    class's book value. They coincide only when both rest on the same snapshot,
+    and registering only one of them is how 1.62x and 1.7x could both be quoted
+    as "the" P/B of one run.
+    """
+    from tradingagents.dataflows.math.precision import safe_ratio
+
+    # The numerator is the market cap: the report's own figure when it states
+    # one, otherwise the price times the B-equivalent count. The two are named
+    # differently in the operands so a reader can see which was used.
+    market_cap = inputs.market_cap_reported
+    if market_cap is None and inputs.price is not None and b_equivalent is not None:
+        market_cap = inputs.price * b_equivalent
+    aggregate = None
+    if market_cap is not None and inputs.equity:
+        aggregate = safe_ratio(market_cap, inputs.equity)
+    _register_if_computable(
+        registry, "pb_aggregate", aggregate,
+        unit="multiple", formula_id="market_cap_div_attributable_equity",
+        operands={"price": inputs.price,
+                  "class_b_equivalent_shares": b_equivalent,
+                  "market_cap": market_cap,
+                  "market_cap_source": (
+                      "report" if inputs.market_cap_reported is not None
+                      else "price_x_shares"),
+                  "equity": inputs.equity},
+        reason=("the aggregate P/B needs a market cap and the attributable "
+                "equity"),
+        source_status=_source_of(inputs, "price", "equity", "shares_class_a",
+                                 "shares_class_b", "class_a_to_b_ratio"),
+        period_end=inputs.equity_period_end,
+    )
+
+    # A disagreement beyond tolerance is recorded, never averaged away and
+    # never hidden by widening the tolerance (the task is explicit about that).
+    _register_pb_reconciliation(registry, pb_per_share_value=per_share_value,
+                                aggregate=aggregate, inputs=inputs)
+
+
+def _register_pb_reconciliation(registry: MetricRegistry, *,
+                                pb_per_share_value: Any,
+                                aggregate: Any,
+                                inputs: RunInputs) -> None:
+    """Record whether the two P/B formulas agree, and by how much (§2 of P4).
+
+    ``market_cap / equity`` and ``price / BVPS`` are the same ratio only when
+    the market cap is built on the *same* share count the book value is spread
+    over. For a dual-class filer they routinely differ, because the class-B price
+    is not the class-A price and the market cap in a report may be quoted at a
+    different moment. The audit's rule is not to force them together: record the
+    difference and refuse to present one figure as *the* P/B when they disagree.
+
+    The tolerance is a *reporting* threshold on the disagreement, not a fudge
+    factor: 1% is what two computations of the same quantity should differ by
+    through rounding alone.
+    """
+    from tradingagents.dataflows.math.precision import as_decimal
+
+    per_share = as_decimal(pb_per_share_value)
+    agg = as_decimal(aggregate)
+    if per_share is None or agg is None or per_share == 0:
+        registry.register(metric(
+            "pb_reconciliation", None, unit="ratio", formula_id="pb_forms_agreement",
+            operands={"pb_per_share": float(per_share) if per_share is not None else None,
+                      "pb_aggregate": float(agg) if agg is not None else None},
+            calculation_status=CalculationStatus.NOT_COMPUTABLE,
+            reason="both P/B forms are needed to check that they agree",
+        ))
+        return
+
+    relative = abs(agg - per_share) / abs(per_share)
+    tolerance = Decimal("0.01")
+    agrees = relative <= tolerance
+    registry.register(metric(
+        "pb_reconciliation",
+        quantize(relative * 100, PERCENT_QUANTUM),
+        unit="percent", formula_id="pb_forms_agreement",
+        operands={"pb_per_share": float(per_share), "pb_aggregate": float(agg),
+                  "equity_period_end": inputs.equity_period_end},
+        calculation_status=(
+            CalculationStatus.VERIFIED if agrees else CalculationStatus.REFUSED),
+        tolerance=tolerance,
+        reason=("" if agrees else
+                f"the two P/B formulas differ by {relative * 100:.2f}%: the "
+                "aggregate and per-share forms do not rest on the same "
+                "snapshot, so neither may be quoted as the definitive P/B"),
+    ))
+
 
 def _register_eps_reconciliation(registry: MetricRegistry,
                                  inputs: RunInputs) -> None:
@@ -386,6 +503,15 @@ def _register_eps_reconciliation(registry: MetricRegistry,
         record = earnings_per_share(
             inputs.eps_ttm * inputs.weighted_average_shares,
             inputs.weighted_average_shares, period_end=None)
+        if "eps_ttm" in (inputs.claimed_inputs or ()):
+            # §3 of P4: the engine can divide the model's own figure by a share
+            # count and produce a perfect EPS. The arithmetic verifies; the
+            # source does not, and a model's assertion is not a filed fact.
+            from dataclasses import replace
+
+            record = replace(record, source_status=SourceStatus.LLM_CLAIMED,
+                             reason=("the trailing EPS is the model's own "
+                                     "assertion, not a figure from the filing"))
         registry.register(record)
         return
 
@@ -458,6 +584,11 @@ def registry_inputs_from_state(state: dict) -> RunInputs:
         # produced NOT_COMPUTABLE for every dual-class metric. Reading them
         # here is what makes the supplied figures reach the arithmetic.
         equity=_num(state.get("equity")),
+        # §2 of P4: a market cap the report states is its own input, not a
+        # recomputation from the price, so the two forms can be compared.
+        market_cap_reported=_num(state.get("market_cap_reported")),
+        equity_period_end=(state.get("equity_period_end")
+                           or snapshot.get("equity_period_end") or None),
         shares_class_a=_num(state.get("shares_class_a")),
         shares_class_b=_num(state.get("shares_class_b")),
         class_a_to_b_ratio=_num(state.get("class_a_to_b_ratio")),
