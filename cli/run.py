@@ -112,6 +112,7 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
 
     config = _build_run_config(selections, checkpoint)
 
+    config["usage_source"] = "cli"
     stats_handler = StatsCallbackHandler()
 
     # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
@@ -350,7 +351,8 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None, flags=None):
             # Clean run: log the decision, then drop this run's checkpoint so a
             # later run starts fresh. A mid-stream failure skips both, keeping
             # the checkpoint for resume.
-            graph.record_decision(selections["ticker"], selections["analysis_date"], final_state)
+            graph.record_decision(selections["ticker"], selections["analysis_date"], final_state,
+                                  portfolio=portfolio)
             graph.clear_checkpoint_on_success(
                 selections["ticker"], selections["analysis_date"], selections["asset_type"], portfolio
             )

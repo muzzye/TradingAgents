@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, 'v[0-9]+.[0-9]+.[0-9]+']
+    # `custom` is this repository's integration branch (AGENTS.md §3), so a
+    # push to it must be validated too — otherwise a merge lands unverified.
+    # `main` is the upstream default branch and stays listed.
+    branches: [main, custom, 'v[0-9]+.[0-9]+.[0-9]+']
   pull_request:
 
 concurrency:
@@ -28,10 +31,14 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install (with dev extras)
+      - name: Install (with dev and web extras)
+        # The suite imports the web console (tests/test_webapp.py,
+        # tests/test_usage.py), which needs fastapi/uvicorn from the `web`
+        # extra. Installing only `dev` made the tests job fail on collection
+        # on every Python version, so it could never be a required check.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,web]"
       - name: Run test suite
         run: pytest -q
 
@@ -65,3 +72,85 @@ jobs:
         # The repo is fully clean under the strict select, so we lint everything
         # (generated results/ is excluded via pyproject extend-exclude).
         run: ruff check .
+
+  reliability-regression:
+    name: P0 reliability regression (offline)
+    runs-on: ubuntu-latest
+    # The P0 gates are the merge gate: a regression here must fail the PR.
+    # These suites are offline by construction — no network, no LLM, no
+    # SEC credentials, no broker — so they are safe to run on every PR.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install (with dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run the P0 regression suites
+        # Only files that exist on this branch: passing a missing path makes
+        # pytest exit non-zero for the wrong reason.
+        run: |
+          pytest -q \
+            tests/test_p0_final_hardening.py \
+            tests/test_p0_paper_safety.py \
+            tests/test_p0_completion.py \
+            tests/test_p0_auto_wiring.py \
+            tests/test_p0_harvest_wiring.py \
+            tests/test_p0_sizing_wiring.py \
+            tests/test_reliability_baseline.py \
+            tests/test_execution_gate.py \
+            tests/test_gate_integration.py \
+            tests/test_risk_engine.py \
+            tests/test_fact_checker.py \
+            tests/test_causal_guard.py \
+            tests/test_data_validator.py \
+            tests/test_audit.py \
+            tests/test_financial_math_engine.py \
+            tests/test_math_gate_end_to_end.py \
+            tests/test_deterministic_math.py \
+            tests/test_metric_definitions.py \
+            tests/test_report_validation.py \
+            tests/test_p0_1924_regression.py \
+            tests/test_trade_actions.py \
+            tests/test_sec_reconciliation.py \
+            tests/test_execution_chokepoint.py \
+            tests/test_determinism.py \
+            tests/test_p0_numbered_cases.py \
+            tests/test_exchange_calendar.py \
+            tests/test_p1_runtime_gate_integration.py \
+            tests/test_p1_build_info.py \
+            tests/test_p2_financial_data_integrity.py \
+            tests/test_p3_math_wiring.py \
+            tests/test_p4_e2e_brkb.py \
+            tests/test_p4_determinism.py \
+            tests/test_p4_negative.py \
+            tests/test_p4_execution_boundary.py
+
+  # §8 of P4: the end-to-end reliability suite runs on its own, on one
+  # interpreter, so a P0 failure in it is legible in the checks list rather
+  # than buried in the regression job's output. It must fail the build when any
+  # of these fail — that is the whole requirement, so no `continue-on-error`.
+  e2e-reliability:
+    name: End-to-end reliability (offline, frozen fixtures)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (with dev extras)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run the end-to-end reliability suites
+        run: |
+          pytest -q -p no:randomly \
+            tests/test_p4_e2e_brkb.py \
+            tests/test_p4_determinism.py \
+            tests/test_p4_negative.py \
+            tests/test_p4_execution_boundary.py \
+            tests/test_p3_math_wiring.py \
+            tests/test_p2_financial_data_integrity.py \
+            tests/test_p1_runtime_gate_integration.py

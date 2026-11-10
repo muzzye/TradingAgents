@@ -22,6 +22,7 @@ from tradingagents.agents import (
 )
 from tradingagents.agents.analysts.turn import WRAP_UP
 from tradingagents.agents.state import AgentState
+from tradingagents.graph.data_quality_node import create_data_quality_check
 
 from .analyst_execution import build_analyst_execution_plan
 from .conditional_logic import ConditionalLogic
@@ -61,7 +62,7 @@ def _analyst_graph(spec, agent, max_tool_rounds: int):
     """
     output = TypedDict(f"{spec.key.capitalize()}Report", {spec.report_key: str})
     graph = StateGraph(AgentState, output_schema=output)
-    graph.add_node("agent", agent)
+    graph.add_node("agent", agent, metadata={"usage_agent": spec.agent_node})
     graph.add_edge(START, "agent")
     if not spec.tools:
         graph.add_edge("agent", END)
@@ -83,7 +84,7 @@ def _analyst_graph(spec, agent, max_tool_rounds: int):
         return agent({**state, "messages": [*state["messages"], HumanMessage(WRAP_UP)]})
 
     graph.add_node("tools", ToolNode(list(spec.tools)))
-    graph.add_node("wrap_up", wrap_up)
+    graph.add_node("wrap_up", wrap_up, metadata={"usage_agent": spec.agent_node})
     graph.add_conditional_edges("agent", _tools_or_done, ["tools", END])
     graph.add_conditional_edges("tools", more_or_wrap_up, ["agent", "wrap_up"])
     graph.add_edge("wrap_up", END)
@@ -161,6 +162,14 @@ class GraphSetup:
         if memory_node is not None:
             workflow.add_node("Memory Log", memory_node)
             first_steps.append("Memory Log")
+
+        # A deterministic data-quality pre-check runs between the analysts and
+        # the research debate: the managers must not debate numbers a later
+        # gate would reject. The node is pure (no LLM, no network) and records
+        # its verdicts so the Execution Gate reuses them instead of recomputing.
+        workflow.add_node("Data Quality Check", create_data_quality_check())
+        first_steps.append("Data Quality Check")
+
         for node in first_steps:
             workflow.add_edge(START, node)
         workflow.add_edge(first_steps, "Bull Researcher")

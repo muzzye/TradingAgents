@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingAgents: web console</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='4' fill='%23087a59'/></svg>">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <div>
+      <h1>TradingAgents</h1>
+      <p class="tagline">Multi-agents LLM financial trading framework</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span id="app-version" class="pill pill-idle mono" title="TradingAgents version served by this process">v…</span>
+    <span id="server-state" class="pill pill-idle">connecting</span>
+    <button id="refresh-options" type="button" class="ghost" title="Reload providers and models">Reload options</button>
+  </div>
+</header>
+
+<nav class="mode-tabs" role="tablist" aria-label="Console sections">
+  <button class="mode-tab is-active" role="tab" data-mode="analyze" aria-selected="true">Analyze</button>
+  <button class="mode-tab" role="tab" data-mode="backtest" aria-selected="false">Backtest</button>
+  <button class="mode-tab" role="tab" data-mode="memory" aria-selected="false">Decision log</button>
+  <button class="mode-tab" role="tab" data-mode="usage" aria-selected="false">Consumi</button>
+</nav>
+
+<main class="layout">
+  <section class="panel form-panel" aria-labelledby="form-title" data-mode-panel="analyze">
+    <h2 id="form-title">New analysis</h2>
+
+    <form id="run-form" novalidate>
+      <div class="field">
+        <label for="ticker">Ticker</label>
+        <input id="ticker" name="ticker" type="text" value="NVDA" autocomplete="off" required
+               placeholder="SPY, 0700.HK, BTC-USD">
+        <p class="hint" id="ticker-hint">Canonical symbol and asset type appear here as you type.</p>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="analysis-date">Analysis date</label>
+          <input id="analysis-date" name="analysis_date" type="date" required>
+        </div>
+        <div class="field">
+          <label for="asset-type">Asset type</label>
+          <select id="asset-type" name="asset_type">
+            <option value="stock">stock</option>
+            <option value="crypto">crypto</option>
+          </select>
+        </div>
+      </div>
+
+      <fieldset class="field">
+        <legend>Analysts</legend>
+        <div id="analysts" class="checks"></div>
+      </fieldset>
+
+      <div class="row">
+        <div class="field">
+          <label for="research-depth">Research depth</label>
+          <select id="research-depth" name="research_depth"></select>
+          <p class="hint" id="depth-hint"></p>
+        </div>
+        <div class="field">
+          <label for="output-language">Output language</label>
+          <select id="output-language" name="output_language"></select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="llm-provider">LLM provider</label>
+        <select id="llm-provider" name="llm_provider"></select>
+        <p class="hint" id="provider-hint"></p>
+      </div>
+
+      <div class="field" id="backend-url-field" hidden>
+        <label for="backend-url">Endpoint base URL</label>
+        <input id="backend-url" name="backend_url" type="url" placeholder="http://localhost:8000/v1">
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="quick-model">Quick-thinking model</label>
+          <select id="quick-model" name="quick_think_llm"></select>
+          <input id="quick-model-custom" class="custom-model" type="text" placeholder="model ID" hidden>
+        </div>
+        <div class="field">
+          <label for="deep-model">Deep-thinking model</label>
+          <select id="deep-model" name="deep_think_llm"></select>
+          <input id="deep-model-custom" class="custom-model" type="text" placeholder="model ID" hidden>
+        </div>
+      </div>
+
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <div class="row">
+          <div class="field">
+            <label for="google-thinking">Gemini thinking level</label>
+            <select id="google-thinking">
+              <option value="">provider default</option>
+              <option value="high">high</option>
+              <option value="minimal">minimal</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="openai-effort">OpenAI reasoning effort</label>
+            <select id="openai-effort">
+              <option value="">provider default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="anthropic-effort">Claude effort</label>
+            <select id="anthropic-effort">
+              <option value="">provider default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
+        </div>
+        <div class="checks">
+          <label class="check"><input id="checkpoint" type="checkbox"> Resume from a saved checkpoint if one exists</label>
+          <label class="check"><input id="save-report" type="checkbox" checked> Save the report under the results directory</label>
+          <label class="check"><input id="save-html" type="checkbox" checked> Also write the one-page HTML report</label>
+        </div>
+        <div class="field">
+          <label for="portfolio">Portfolio (optional JSON)</label>
+          <textarea id="portfolio" rows="3" spellcheck="false"
+                    placeholder='{"cash": 10000, "currency": "USD", "positions": [{"ticker": "NVDA", "quantity": 40, "average_price": 121.5}]}'></textarea>
+        </div>
+      </details>
+
+      <div id="form-error" class="alert" role="alert" hidden></div>
+
+      <div class="actions">
+        <button id="start" type="submit" class="primary">Run analysis</button>
+        <button id="cancel" type="button" class="ghost" hidden>Stop run</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel run-panel" aria-labelledby="run-title" data-mode-panel="analyze">
+    <div class="run-head">
+      <h2 id="run-title">Run</h2>
+      <div class="run-meta">
+        <span id="run-status" class="pill pill-idle">idle</span>
+        <span id="run-elapsed" class="mono subtle"></span>
+      </div>
+    </div>
+
+    <p id="run-empty" class="empty">Start an analysis to see the agents work here.</p>
+
+    <div id="run-view" hidden>
+      <p id="run-phase" class="phase"></p>
+
+      <div class="meter">
+        <div class="meter-row">
+          <span>Agents</span><span id="agents-count" class="mono"></span>
+        </div>
+        <div class="bar"><div id="agents-bar" class="bar-fill"></div></div>
+        <div class="meter-row">
+          <span>Reports</span><span id="reports-count" class="mono"></span>
+        </div>
+        <div class="bar"><div id="reports-bar" class="bar-fill"></div></div>
+      </div>
+
+      <div id="run-note" class="alert alert-warn" hidden></div>
+      <div id="run-error" class="alert alert-error" hidden></div>
+
+      <div class="stats" id="run-stats"></div>
+
+      <div class="tabs" role="tablist">
+        <button class="tab is-active" role="tab" data-tab="agents" aria-selected="true">Agents</button>
+        <button class="tab" role="tab" data-tab="messages" aria-selected="false">Messages</button>
+        <button class="tab" role="tab" data-tab="report" aria-selected="false">Report</button>
+        <button class="tab" role="tab" data-tab="history" aria-selected="false">History</button>
+      </div>
+      <div class="tab-body" data-panel="agents">
+        <table class="agents-table">
+          <thead><tr><th scope="col">Team</th><th scope="col">Agent</th><th scope="col">Status</th></tr></thead>
+          <tbody id="agents-body"></tbody>
+        </table>
+      </div>
+
+      <div class="tab-body" data-panel="messages" hidden>
+        <ul id="message-list" class="messages"></ul>
+      </div>
+
+      <div class="tab-body" data-panel="report" hidden>
+        <div id="report-links" class="report-links"></div>
+        <div id="report-chart" class="report-chart" hidden></div>
+        <div id="report-content" class="report-body"></div>
+      </div>
+
+      <div class="tab-body" data-panel="history" hidden>
+        <ul id="run-list" class="run-list"></ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel backtest-panel" aria-labelledby="backtest-title" data-mode-panel="backtest" hidden>
+    <div class="run-head">
+      <h2 id="backtest-title">Backtest</h2>
+      <div class="run-meta">
+        <span id="backtest-status" class="pill pill-idle">idle</span>
+      </div>
+    </div>
+    <p class="hint">Score past decisions over a grid of tickers and dates. Each cell is one analysis, settled against its benchmark when the holding window has traded. One sweep at a time.</p>
+
+    <form id="backtest-form" novalidate>
+      <div class="field">
+        <label for="bt-tickers">Tickers</label>
+        <input id="bt-tickers" type="text" value="NVDA,AAPL" autocomplete="off" placeholder="NVDA,AAPL,MSFT">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="bt-start">Start date</label>
+          <input id="bt-start" type="date" required>
+        </div>
+        <div class="field">
+          <label for="bt-end">End date</label>
+          <input id="bt-end" type="date" required>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="bt-every">Days between dates</label>
+          <input id="bt-every" type="number" min="1" value="7">
+        </div>
+        <div class="field">
+          <label for="bt-asset">Asset type</label>
+          <select id="bt-asset">
+            <option value="stock">stock</option>
+            <option value="crypto">crypto</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="bt-analysts">Analysts (comma-separated, empty = all)</label>
+        <input id="bt-analysts" type="text" placeholder="market,sentiment,news,fundamentals">
+      </div>
+      <div class="field">
+        <label for="bt-portfolio">Portfolio (optional JSON, same book for every cell)</label>
+        <textarea id="bt-portfolio" rows="2" spellcheck="false"
+                  placeholder='{"cash": 10000, "positions": [{"ticker": "NVDA", "quantity": 40, "average_price": 121.5}]}'></textarea>
+      </div>
+      <div id="backtest-error" class="alert" role="alert" hidden></div>
+      <div class="actions">
+        <button id="bt-start-btn" type="submit" class="primary">Run backtest</button>
+        <button id="bt-cancel" type="button" class="ghost" hidden>Stop sweep</button>
+      </div>
+    </form>
+
+    <div id="backtest-view" hidden>
+      <p id="backtest-phase" class="phase"></p>
+      <div class="meter">
+        <div class="meter-row">
+          <span>Cells</span><span id="bt-cells-count" class="mono"></span>
+        </div>
+        <div class="bar"><div id="bt-cells-bar" class="bar-fill"></div></div>
+      </div>
+      <div id="backtest-note" class="alert alert-warn" hidden></div>
+      <div id="backtest-error-view" class="alert alert-error" hidden></div>
+      <div id="backtest-summary" class="bt-summary" hidden></div>
+      <div id="backtest-failures" class="bt-failures" hidden></div>
+    </div>
+
+    <div class="archive-head">
+      <h3>Past sweeps</h3>
+      <button id="bt-refresh" type="button" class="ghost">Refresh</button>
+    </div>
+    <p id="bt-list-empty" class="empty" hidden>No sweeps yet.</p>
+    <ul id="bt-list" class="run-list"></ul>
+  </section>
+
+  <section class="panel memory-panel" aria-labelledby="memory-title" data-mode-panel="memory" hidden>
+    <div class="run-head">
+      <h2 id="memory-title">Decision log</h2>
+      <div class="run-meta">
+        <span id="settle-status" class="pill pill-idle">idle</span>
+        <button id="settle-btn" type="button" class="ghost">Settle pending</button>
+        <button id="memory-refresh" type="button" class="ghost">Refresh</button>
+      </div>
+    </div>
+    <p class="hint">Every decision the runs recorded, and once its holding window has traded, the realized and alpha return with the model's reflection. This is the log later runs read back as lessons.</p>
+    <p id="memory-path" class="mono subtle"></p>
+    <div id="settle-result" class="alert" hidden></div>
+    <p id="memory-empty" class="empty" hidden>The log is empty: no run has recorded a decision yet.</p>
+    <div class="memory-table-wrap">
+      <table class="memory-table">
+        <thead><tr>
+          <th scope="col">Date</th><th scope="col">Ticker</th><th scope="col">Rating</th>
+          <th scope="col">Raw</th><th scope="col">Alpha</th><th scope="col">Held</th><th scope="col">Outcome</th>
+        </tr></thead>
+        <tbody id="memory-body"></tbody>
+      </table>
+    </div>
+    <div id="memory-detail" class="memory-detail" hidden>
+      <div class="archive-head">
+        <h3 id="memory-detail-title"></h3>
+        <button id="memory-close" type="button" class="ghost">Close</button>
+      </div>
+      <div class="report-section">
+        <h3>Decision</h3>
+        <div id="memory-decision" class="markdown"></div>
+      </div>
+      <div class="report-section" id="memory-reflection-section">
+        <h3>Reflection</h3>
+        <div id="memory-reflection" class="markdown"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel archive-panel" aria-labelledby="archive-title" data-mode-panel="analyze">
+    <div class="run-head">
+      <h2 id="archive-title">Saved reports</h2>
+      <button id="refresh-archive" type="button" class="ghost" title="Rescan the results directory">Refresh</button>
+    </div>
+    <p class="hint">Every report already on disk, including ones from earlier sessions or the CLI. Pick one to read it here.</p>
+    <p id="archive-empty" class="empty" hidden>No saved reports yet.</p>
+    <ul id="archive-list" class="run-list"></ul>
+
+    <div id="archive-view" hidden>
+      <div class="archive-head">
+        <h3 id="archive-title-line"></h3>
+        <div class="archive-head-right">
+          <span id="archive-meta" class="mono subtle"></span>
+          <button id="archive-rerun" type="button" class="ghost" title="Pre-fill the form with this report's settings">Re-run</button>
+          <button id="archive-compare" type="button" class="ghost" title="Compare with another report of the same ticker">Compare…</button>
+          <button id="archive-delete" type="button" class="ghost danger">Delete report</button>
+        </div>
+      </div>
+      <div id="archive-links" class="archive-links"></div>
+      <div id="archive-content" class="report-body"></div>
+    </div>
+
+    <div id="compare-view" hidden>
+      <div class="archive-head">
+        <h3 id="compare-title"></h3>
+        <button id="compare-close" type="button" class="ghost">Close</button>
+      </div>
+      <div class="compare-grid" id="compare-grid"></div>
+    </div>
+  </section>
+
+  <section class="panel usage-panel" aria-labelledby="usage-title" data-mode-panel="usage" hidden>
+    <h2 id="usage-title">Consumi LLM</h2>
+    <p class="hint">Storico delle nuove chiamate da web, CLI e backtest. I costi sono stime in USD, non importi fatturati. Le chiamate tramite abbonamento non hanno un costo API disponibile salvo tariffa impostata.</p>
+    <form id="usage-filters" class="usage-filter-grid">
+      <div class="field"><label for="usage-start">Dal (UTC)</label><input id="usage-start" name="start" type="date"></div>
+      <div class="field"><label for="usage-end">Al (UTC)</label><input id="usage-end" name="end" type="date"></div>
+      <div class="field"><label for="usage-ticker">Ticker</label><input id="usage-ticker" name="ticker" placeholder="NVDA"></div>
+      <div class="field"><label for="usage-model">Modello</label><input id="usage-model" name="model" placeholder="ID esatto"></div>
+      <div class="field"><label for="usage-run">Analisi</label><input id="usage-run" name="run_id" placeholder="ID analisi"></div>
+      <div class="actions"><button class="primary" type="submit">Aggiorna</button><button id="usage-reset" type="button" class="ghost">Azzera filtri</button><a id="usage-csv" href="/api/usage.csv" download>Esporta CSV</a></div>
+    </form>
+    <p id="usage-error" class="alert alert-error" role="alert" hidden></p>
+    <div id="usage-summary" class="usage-cards" aria-live="polite"></div>
+    <p id="usage-note" class="hint"></p>
+    <p id="usage-empty" class="empty">Nessuna chiamata registrata. Avvia una nuova analisi per raccogliere i consumi.</p>
+    <h3>Per modello</h3>
+    <div class="memory-table-wrap"><table class="memory-table"><thead><tr><th>Provider</th><th>Modello</th><th>Chiamate</th><th>Input</th><th>Output</th><th>Costo stimato USD</th></tr></thead><tbody id="usage-models"></tbody></table></div>
+    <h3>Chiamate recenti</h3><p id="usage-limit" class="hint"></p>
+    <div class="memory-table-wrap"><table class="memory-table"><thead><tr><th>Data</th><th>Ticker</th><th>Analisi</th><th>Origine</th><th>Agente</th><th>Modello</th><th>Stato</th><th>Input</th><th>Output</th><th>Durata</th><th>Costo stimato USD</th></tr></thead><tbody id="usage-calls"></tbody></table></div>
+    <details><summary>Tariffe dei modelli</summary>
+      <p class="hint">Prezzi in USD per un milione di token. Validi per le nuove chiamate; lo storico conserva la tariffa applicata. Se ci sono token cache e manca la tariffa cache, il costo resta non disponibile. I retry interni al provider potrebbero non essere visibili.</p>
+      <form id="usage-price-form" class="usage-filter-grid">
+        <div class="field"><label for="price-provider">Provider</label><input id="price-provider" name="provider" required maxlength="100" placeholder="openai"></div>
+        <div class="field"><label for="price-model">Modello</label><input id="price-model" name="model" required maxlength="250"></div>
+        <div class="field"><label for="price-input">Input USD / 1M</label><input id="price-input" name="input_rate" type="number" min="0" step="any" required></div>
+        <div class="field"><label for="price-output">Output USD / 1M</label><input id="price-output" name="output_rate" type="number" min="0" step="any" required></div>
+        <div class="field"><label for="price-cache">Cache USD / 1M (opzionale)</label><input id="price-cache" name="cache_rate" type="number" min="0" step="any"></div>
+        <button type="submit" class="primary">Salva tariffa</button>
+      </form>
+      <p id="usage-price-message" role="status"></p>
+      <div class="memory-table-wrap"><table class="memory-table"><thead><tr><th>Provider</th><th>Modello</th><th>Input</th><th>Output</th><th>Cache</th><th>Aggiornata</th></tr></thead><tbody id="usage-prices"></tbody></table></div>
+    </details>
+  </section>
+</main>
+
+<footer class="foot">
+  Local console. Runs, reports and the memory log stay on this machine, written where the CLI writes them.
+</footer>
+
+<script src="/static/app.js"></script>
+<script src="/static/usage.js"></script>
+</body>
+</html>

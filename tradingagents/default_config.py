@@ -8,6 +8,7 @@ _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 # of the existing default, so users can keep writing plain strings in
 # their .env file.
 _ENV_OVERRIDES = {
+    "TRADINGAGENTS_USAGE_DB_PATH":        "usage_db_path",
     "TRADINGAGENTS_LLM_PROVIDER":         "llm_provider",
     "TRADINGAGENTS_DEEP_THINK_LLM":       "deep_think_llm",
     "TRADINGAGENTS_QUICK_THINK_LLM":      "quick_think_llm",
@@ -88,7 +89,16 @@ def build_default_config() -> dict:
         # the oldest resolved entries are pruned once this limit is exceeded.
         # Pending entries are never pruned. None disables rotation entirely.
         "memory_log_max_entries": None,
+        # How many run records to keep per instrument (§2 of P4). ``None``
+        # keeps every run: an audit trail that ages out unasked is not a trail,
+        # so pruning happens only when a number is set here.
+        "run_record_keep": None,
+        # Characters of each agent report kept in a run record. A full report
+        # per run, times many runs, is what fills a disk; the head is what a
+        # reader checks first and the truncation is recorded, never hidden.
+        "run_record_max_text_chars": 20_000,
         # LLM settings
+        "usage_db_path": os.path.join(_TRADINGAGENTS_HOME, "usage.sqlite"),
         "llm_provider": "openai",
         "deep_think_llm": "gpt-6-sol",
         "quick_think_llm": "gpt-6-luna",
@@ -178,6 +188,12 @@ def build_default_config() -> dict:
         # Trading days from the first close after the analysis date over which a
         # decision's outcome is measured, for reflection and for the backtest figures.
         "holding_period_days": 5,
+        # P0.1 fundamentals-freshness gate: compare the period the fundamentals
+        # analyst used against the latest SEC filing known at the analysis
+        # date (point-in-time, no look-ahead). A stale or undatable period
+        # blocks the decision's execution vocabulary. Disable only when the
+        # instrument universe has no US filers at all.
+        "fundamentals_freshness_gate": True,
         "benchmark_ticker": None,
         "benchmark_map": {
             ".NS":  "^NSEI",       # NSE India (Nifty 50)

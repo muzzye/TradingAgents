@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,12 +13,23 @@ from tradingagents.agents.context import build_instrument_context, resolve_instr
 from tradingagents.agents.rating import run_rating
 from tradingagents.dataflows.config import run_config, run_config_context, set_config
 from tradingagents.dataflows.date_window import get_current_date, is_historical
+from tradingagents.dataflows.filing_freshness import (
+    filings_from_sec_edgar,
+    used_period_end_from_report,
+)
+from tradingagents.dataflows.gate_integration import (
+    attach_registry_status,
+    attach_to_state,
+    evaluate_decision,
+    write_audit_record,
+)
 from tradingagents.dataflows.symbols import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.llm_clients import create_tier_client, tier_provider
 from tradingagents.memory import TradingMemoryLog, settlement
 from tradingagents.memory.reflection import Reflector
 from tradingagents.reporting import write_report_tree
+from tradingagents.usage import UsageCallback, UsageStore, new_context
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
@@ -25,6 +37,78 @@ from .propagation import Propagator
 from .setup import GraphSetup
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_extracted(base, extracted):
+    """Combine the state's own figures with the ones read from the reports.
+
+    The state wins: a structured value a node wrote is authoritative, while a
+    figure recovered from report text is a fallback for the fields no node
+    fills. ``claimed_inputs`` is a union rather than a fallback — it names
+    inputs that came from model prose, and losing it would re-trust a figure
+    that is only an assertion.
+    """
+    if base is None:
+        return extracted
+    if extracted is None:
+        return base
+    updates = {}
+    for name in base.__dataclass_fields__:
+        if name == "claimed_inputs":
+            merged = tuple(sorted(set(base.claimed_inputs or ())
+                                  | set(extracted.claimed_inputs or ())))
+            if merged != tuple(base.claimed_inputs or ()):
+                updates[name] = merged
+            continue
+        current = getattr(base, name, None)
+        if current is not None and current != "":
+            continue
+        found = getattr(extracted, name, None)
+        if found is not None:
+            updates[name] = found
+    return replace(base, **updates) if updates else base
+
+
+def _portfolio_sizing_inputs(config: dict, portfolio, ticker: str) -> dict:
+    """The portfolio figures deterministic sizing needs (§5 of P3).
+
+    Returns an empty dict when no book was supplied, which leaves ``equity`` and
+    ``risk_budget`` as ``None`` — the signal the engine reads as "cannot size"
+    rather than "size zero". That distinction is the whole of F4: the previous
+    run passed nothing, the engine had no equity to cap against, and the audit
+    recorded ``qty_proposed: null``.
+
+    ``equity`` is deliberately not derived from ``cash``: the base an exposure
+    cap is a fraction of is not the same number as the free balance.
+    """
+    if portfolio is None:
+        return {}
+
+    equity = getattr(portfolio, "equity", None)
+    if not isinstance(equity, (int, float)) or isinstance(equity, bool) \
+            or equity <= 0:
+        # A book without equity is still not sizeable; the engine says so.
+        return {"cash": getattr(portfolio, "cash", None)}
+
+    inputs: dict = {
+        "equity": float(equity),
+        "cash": getattr(portfolio, "cash", None),
+        "risk_budget": float(equity) * float(
+            config.get("risk_per_trade_pct") or 0.01),
+        "max_symbol_exposure": config.get("max_symbol_exposure") or 0.05,
+    }
+
+    # Existing exposure in this instrument, so the cap counts what is already
+    # held instead of sizing as if the book were empty.
+    try:
+        held = portfolio.position_in(ticker)
+    except Exception:  # noqa: BLE001 — an unreadable book is not a flat one
+        held = None
+    if held is not None and getattr(held, "quantity", 0):
+        price = getattr(held, "average_price", None)
+        if isinstance(price, (int, float)) and price > 0:
+            inputs["existing_notional"] = abs(float(held.quantity)) * float(price)
+    return inputs
 
 
 def _validate_trade_date(trade_date) -> str:
@@ -45,6 +129,7 @@ def _validate_trade_date(trade_date) -> str:
 # whether it checkpoints, and how often it retries a provider.
 _NOT_IN_SIGNATURE = frozenset({
     "results_dir", "data_cache_dir", "memory_log_path", "checkpoint_enabled", "llm_max_retries",
+    "usage_db_path", "usage_run_id", "usage_source",
 })
 
 
@@ -75,9 +160,15 @@ class TradingAgentsGraph:
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
 
-        extra = {"callbacks": self.callbacks} if self.callbacks else {}
-        self.deep_thinking_llm = create_tier_client(self.config, "deep", **extra).get_llm()
-        self.quick_thinking_llm = create_tier_client(self.config, "quick", **extra).get_llm()
+        self.usage_context = new_context(self.config)
+        def metered_llm(tier):
+            handler = UsageCallback(self.usage_context, tier_provider(self.config, tier),
+                                    self.config[f"{tier}_think_llm"],
+                                    UsageStore(self.config.get("usage_db_path")))
+            return create_tier_client(self.config, tier,
+                                      callbacks=[*self.callbacks, handler]).get_llm()
+        self.deep_thinking_llm = metered_llm("deep")
+        self.quick_thinking_llm = metered_llm("quick")
 
         self.memory_log = TradingMemoryLog(self.config)
 
@@ -298,6 +389,7 @@ class TradingAgentsGraph:
         and loads them alongside the analysts (see ``_memory_step``).
         """
         trade_date = _validate_trade_date(trade_date)
+        self.usage_context.update(new_context(self.config), ticker=company_name, analysis_date=trade_date)
         return self.propagator.create_initial_state(
             company_name,
             trade_date,
@@ -356,10 +448,19 @@ class TradingAgentsGraph:
         with run_config(self.config):
             return settlement.settle_all_pending(self.memory_log, self.reflector, self.config, wait=wait)
 
-    def record_decision(self, company_name, trade_date, final_state):
+    def record_decision(self, company_name, trade_date, final_state, portfolio=None):
         """Record a finished run: its state log, and its decision in the memory log
-        for reflection on the next same-ticker run. propagate() and the CLI both end here."""
+        for reflection on the next same-ticker run. propagate() and the CLI both end here.
+
+        ``portfolio`` is the caller's book. It is what makes deterministic sizing
+        possible at all (§5 of P3): the risk budget and the per-symbol exposure
+        cap are fractions of the account's equity, so without a book the engine
+        refuses to size rather than inventing one. An unknown book is never
+        treated as a flat one.
+        """
         self._log_state(trade_date, final_state)
+        self._evaluate_reliability(company_name, trade_date, final_state,
+                                   portfolio=portfolio)
         decision = final_state.get("final_trade_decision")
         if not decision:
             logger.warning("No final decision for %s on %s; nothing added to the memory log",
@@ -369,6 +470,189 @@ class TradingAgentsGraph:
             ticker=company_name, trade_date=trade_date, final_trade_decision=decision,
             rating=run_rating(final_state),
         )
+
+    def _evaluate_reliability(self, company_name, trade_date, final_state,
+                              portfolio=None):
+        """Run the decision through the Execution Gate and write the audit.
+
+        Best-effort by design: a reliability-layer failure must not lose the
+        run's own reports or memory entry, so any exception is logged and
+        skipped. The gate's verdict is attached to the state (execution_action)
+        and the audit JSON lands beside the state log.
+
+        The P0.1 fundamentals-freshness gate runs automatically: the filings
+        known at the analysis date come from SEC EDGAR (point-in-time, no
+        look-ahead) and the period the analyst used is read from the run's
+        own fundamentals report. A non-US filer or an unreachable SEC yields
+        no filings, and the gate reports FUNDAMENTALS_UNAVAILABLE rather
+        than guessing — an extraction failure must not skip the gate, it
+        must fail closed.
+        """
+        filings = self._known_filings(company_name, trade_date)
+        used_end = used_period_end_from_report(
+            final_state.get("fundamentals_report")
+        )
+        # §3: a registry belongs to THIS run. Built here, attached here,
+        # discarded with the analysis — a process-wide one would let one
+        # analysis certify another's figures.
+        registry = self._build_metric_registry(company_name, trade_date,
+                                               final_state)
+        # §2 of P4: one id shared by the audit and the run record, minted once
+        # per analysis so the two files can be matched and neither can collide
+        # with another run of the same instrument on the same day.
+        from tradingagents.dataflows import run_record as rr
+        run_id = rr.new_run_id(company_name)
+        try:
+            record, decision = evaluate_decision(
+                company_name, trade_date, final_state,
+                snapshot_id=f"{company_name}-{trade_date}",
+                model_versions={
+                    "deep": self.config.get("deep_think_llm"),
+                    "quick": self.config.get("quick_think_llm"),
+                },
+                fundamentals_filings=filings,
+                used_fundamentals_period_end=used_end,
+                metric_registry=registry,
+                **_portfolio_sizing_inputs(self.config, portfolio, company_name),
+            )
+            attach_to_state(final_state, decision)
+            attach_registry_status(final_state, registry)
+            path = write_audit_record(record, self.config["results_dir"],
+                                      run_id=run_id)
+            logger.info("Reliability audit for %s on %s: %s -> %s",
+                        company_name, trade_date, decision.action.value, path)
+            # §2 of P4: the audit filename is stamped by analysis date, so two
+            # analyses of one instrument on one day replace each other. The run
+            # record is addressed by a unique id instead, and keeps everything
+            # needed to reproduce the decision.
+            self._write_run_record(company_name, trade_date, final_state,
+                                   record, decision, registry, filings,
+                                   portfolio, run_id)
+        except Exception:  # noqa: BLE001 — the audit must never sink the run
+            logger.exception("Reliability evaluation failed for %s on %s",
+                             company_name, trade_date)
+
+    def _write_run_record(self, company_name, trade_date, final_state,
+                          audit_record, decision, registry, filings,
+                          portfolio, run_id):
+        """Persist this analysis under a unique id (§2 of P4).
+
+        Separate from the audit file and deliberately so: the audit answers
+        "was this decision sound", the run record answers "what exactly ran, on
+        what inputs, with what code". Best-effort like the rest of the
+        reliability layer — losing the record must not lose the analysis — but
+        a failure is logged at error level rather than swallowed, because a run
+        without a record is the finding, not a detail.
+        """
+        try:
+            from tradingagents.dataflows import run_record as rr
+
+            results_dir = self.config["results_dir"]
+            snapshot = final_state.get("verified_market_snapshot")
+            record = rr.RunRecord(
+                run_id=run_id,
+                ticker=company_name,
+                analysis_date=trade_date,
+                fingerprint=rr.runtime_fingerprint(),
+                model_config=rr.model_config(self.config),
+                inputs=rr.redact({
+                    "market_snapshot": snapshot,
+                    "portfolio": (portfolio.model_dump()
+                                  if portfolio is not None else None),
+                    "asset_type": final_state.get("asset_type"),
+                }),
+                filings=list(filings or []),
+                metric_registry=(registry.summary()
+                                 if registry is not None else {}),
+                agents={
+                    "market": final_state.get("market_report"),
+                    "sentiment": final_state.get("sentiment_report"),
+                    "news": final_state.get("news_report"),
+                    "fundamentals": final_state.get("fundamentals_report"),
+                    "research_plan": final_state.get("investment_plan"),
+                    "trader_plan": final_state.get("trader_investment_plan"),
+                },
+                decision={
+                    "report": final_state.get("final_trade_decision"),
+                    "rating": final_state.get("final_rating"),
+                    "execution_action": decision.action.value,
+                    "reason_codes": [r.value for r in decision.reasons],
+                    "execution_authorization": final_state.get(
+                        "execution_authorization"),
+                },
+                risk=audit_record.to_dict().get("risk", {}),
+                execution_gate=audit_record.to_dict().get("execution", {}),
+                audit=audit_record.to_dict(),
+            )
+            path = rr.write_run(
+                results_dir, record,
+                max_text_chars=int(
+                    self.config.get("run_record_max_text_chars") or 20_000))
+            final_state["run_id"] = run_id
+            final_state["run_record_path"] = str(path)
+            logger.info("Run record for %s on %s: %s",
+                        company_name, trade_date, path)
+
+            # An explicit limit only. An audit that ages out unasked is not an
+            # audit, so nothing is pruned unless the operator set a number.
+            keep = self.config.get("run_record_keep")
+            if isinstance(keep, int) and keep > 0:
+                rr.prune_runs(results_dir, company_name, keep)
+        except Exception:  # noqa: BLE001 — a record failure must not sink the run
+            logger.error("Could not write the run record for %s on %s",
+                         company_name, trade_date, exc_info=True)
+
+
+    def _build_metric_registry(self, company_name: str, trade_date: str,
+                               final_state: dict):
+        """The certified metrics for this run (§3).
+
+        Best-effort like the rest of the reliability layer: a failure here must
+        not lose the run's reports, and the gate still sees ``None`` — which it
+        reports as "nothing was checked" rather than as a pass.
+        """
+        try:
+            from tradingagents.dataflows.math.extraction import (
+                extract_run_inputs,
+            )
+            from tradingagents.dataflows.math.run_registry import (
+                build_run_registry,
+                registry_inputs_from_state,
+            )
+
+            # The labelled figures the reports actually state are read first
+            # (F2/F3): `registry_inputs_from_state` alone reads only state
+            # keys no node writes, so every valuation metric came out
+            # NOT_COMPUTABLE and the model's own numbers were never checked.
+            extracted = extract_run_inputs(final_state)
+            inputs = registry_inputs_from_state(final_state)
+            inputs = _merge_extracted(inputs, extracted.inputs)
+            return build_run_registry(
+                inputs, run_id=f"{company_name}-{trade_date}")
+        except Exception:  # noqa: BLE001 — an unavailable registry is not a pass
+            logger.debug("Could not build the metric registry for %s on %s",
+                         company_name, trade_date, exc_info=True)
+            return None
+
+    def _known_filings(self, ticker: str, trade_date: str) -> list | None:
+        """The authoritative filings known at the analysis date, point-in-time.
+
+        Reads SEC EDGAR's cached companyfacts through the freshness module's
+        extractor, which filters every filing to ``filed <= trade_date`` —
+        a backtest never sees a filing the market had not seen. Best-effort:
+        an unreachable SEC or a non-US filer yields an empty list, which the
+        freshness gate reports as FUNDAMENTALS_UNAVAILABLE (fail-closed),
+        never a guess. Returns None when the operator disabled the gate: the
+        check is then not run at all, rather than run against nothing.
+        """
+        if not self.config.get("fundamentals_freshness_gate", True):
+            return None
+        try:
+            return filings_from_sec_edgar(ticker, trade_date)
+        except Exception:  # noqa: BLE001 — an extraction failure is UNAVAILABLE
+            logger.debug("Could not extract filings for %s as of %s",
+                         ticker, trade_date, exc_info=True)
+            return []
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock",
                    checkpoint_thread_id: str | None = None, portfolio=None):
@@ -397,7 +681,8 @@ class TradingAgentsGraph:
         else:
             final_state = self.graph.invoke(graph_input, **args)
 
-        self.record_decision(company_name, trade_date, final_state)
+        self.record_decision(company_name, trade_date, final_state,
+                             portfolio=portfolio)
 
         # Clear checkpoint on successful completion to avoid stale state.
         self.clear_checkpoint_on_success(company_name, trade_date, asset_type, portfolio)

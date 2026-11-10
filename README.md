@@ -189,6 +189,8 @@ For local models, configure Ollama with `llm_provider: "ollama"`. The default en
 
 For any other OpenAI-compatible server (vLLM, LM Studio, llama.cpp, or a custom relay), use `llm_provider: "openai_compatible"` and set the endpoint via `backend_url` (or `TRADINGAGENTS_LLM_BACKEND_URL`), e.g. `http://localhost:8000/v1` for vLLM or `http://localhost:1234/v1` for LM Studio. The model is whatever your server serves. No key is needed for local servers; set `OPENAI_COMPATIBLE_API_KEY` when the endpoint requires one.
 
+A relay that serves several models works the same way: list its models with `curl -H "Authorization: Bearer $OPENAI_COMPATIBLE_API_KEY" <backend_url>/models` and use the returned IDs verbatim, since some gateways prefix them (e.g. `llmfactory:local:GLM-5.3`). A tier may then run a different model from the other, which is worth doing on a mixed menu: give the deep tier the strongest reasoning model and the quick tier the fastest reliable one, because the analysts and debaters make far more calls than the managers do. Not every served model is usable — one that rejects the tool payload breaks structured output — so try a tier candidate on a report before relying on it.
+
 With `TYPESAFE_API_KEY` set, the Sentiment Analyst screens StockTwits and Reddit posts with TypeSafe's Jev before reading them. Posts that are not about the company are dropped, and each source opens with a count of the remaining posts by stance: bullish, bearish, neutral, or unclear. Without the key, posts pass through unscreened. `jev-latest` moves with new releases; set `TYPESAFE_DEFAULT_MODEL` to a versioned ID such as `jev-1.13.0` to hold it fixed across runs. To reach Jev through OpenRouter, put an OpenRouter key in `TYPESAFE_API_KEY` and set `TYPESAFE_BASE_URL=https://openrouter.ai/api`.
 
 Alternatively, copy `.env.example` to `.env` and fill in your keys:
@@ -217,6 +219,33 @@ At start-up the interactive CLI mentions a newer release and notices from Tauric
 
 A saved report also includes `complete_report.html`, the report as one page with its sections listed beside the text, for reading in a browser, on a phone or in print. Answering the save question at the prompt also asks about the page and can open it in your browser; `--no-html` skips it, and so does `ta.save_reports(state, "NVDA", html=False)` from Python.
 
+### Web console
+
+The same analysis is also available as a local web page, for when a browser is more convenient than a terminal. It is an extra layer over the CLI: it imports the CLI's own checks, live state and report writer, and changes none of them.
+
+```bash
+pip install ".[web]"        # FastAPI and Uvicorn, the only extra dependencies
+python -m webapp            # or: tradingagents-web
+```
+
+Then open <http://127.0.0.1:8000/>. The page offers the same choices the CLI asks for — ticker, analysis date, analysts, research depth, output language, LLM provider and the quick/deep thinking models — plus the advanced knobs (provider thinking level, checkpoint resume, report saving, and an optional portfolio JSON). The asset type and the analysts on offer follow the ticker as you type, exactly as the CLI detects them. The form's answers are remembered in the browser, so a reload keeps what was chosen.
+
+While a run progresses the page shows the agent table, the message and tool log, token and call counts, and each report section as it lands; the finished run links to the same `complete_report.html` and Markdown the CLI writes, and draws the ticker's daily closes around the analysis date as a small chart, read through the same point-in-time vendor path the agents use. Several analyses can run at once: the History tab lists them all, and picking one shows it while the others keep going. Runs, reports and the memory log go to the usual places under `results_dir`, so a web run and a CLI run leave the same artifacts. Stopping a run lets the step in flight finish and then stops before the next one.
+
+The **Backtest** tab runs the CLI's `backtest` command in the page: a grid of tickers and dates, one analysis per cell, settled against its benchmark when the holding window has traded, with the same per-rating score the CLI prints. One sweep runs at a time; a sweep writes its own memory log under `results_dir/backtest/<run_id>/`, so the live log real runs read back is never flooded by it.
+
+The **Decision log** tab shows the memory log: every recorded decision and, once settled, its realized and alpha return with the model's reflection. **Settle pending** runs the same settlement pass a run performs at its start, so decisions whose holding window has since traded get their outcome without waiting for the next analysis.
+
+Below the run panel, **Saved reports** lists every report already under `results_dir`, including ones written by earlier sessions or by the CLI, so restarting the server does not lose access to them. Pick one to read its agent sections in the page, or open its HTML page and Markdown. A report a run wrote and then left unfinished — cancelled, or failed partway — is listed too, marked as such, with the sections it had reached; once a completed report covers the same ticker and analysis date, that unfinished entry gives way to it rather than showing twice.
+
+**Re-run** pre-fills the form from the open report's header — ticker, analysis date, analysts, depth and models — so repeating an analysis with the same settings is one click. **Compare** reads two reports of the same ticker side by side, agent by agent, so a verdict's change between two dates is visible at a glance.
+
+**Delete report** removes the open report from disk after asking to confirm, since the deletion cannot be undone. A finished report takes its whole stamped folder with it; an unfinished run loses only the sections it wrote, because the run's message log beside them is a separate record. Deleting is available over the API too, as `DELETE /api/archive/<id>?confirm=true`: without the explicit `confirm` the request is refused rather than obeyed, so nothing is destroyed by a stray call.
+
+The version the server is running appears in the header pill (`v0.8.0`) and in the console's start-up line; the same value is returned as `version` by `/api/health` and `/api/options`, so a page can tell which build it is talking to without reading the source.
+
+Settings live in `TRADINGAGENTS_WEB_HOST`, `TRADINGAGENTS_WEB_PORT` and `TRADINGAGENTS_WEB_RELOAD`. The API starts paid model runs and serves files from this machine, so it binds to the loopback address and refuses to bind elsewhere unless `TRADINGAGENTS_WEB_ALLOW_REMOTE=1` is set; it also rejects requests whose `Host` header is not a local name.
+
 ### Markets and tickers
 
 TradingAgents works with any market Yahoo Finance covers, using the exchange-suffixed ticker. Company identity and the alpha benchmark resolve automatically per market.
@@ -242,6 +271,16 @@ An interface will appear showing results as they load, letting you track the age
 </p>
 
 ## TradingAgents Package
+
+### Project layout
+
+| Path | What lives there |
+| --- | --- |
+| `tradingagents/` | The framework: the LangGraph pipeline (`graph/`), the agents (`agents/`), data vendors (`dataflows/`), LLM clients (`llm_clients/`) and the report writer (`reporting.py`, `report_html.py`). |
+| `cli/` | The terminal app: menus, live display, run loop and preference storage. |
+| `webapp/` | The local web console: the HTTP layer (`app.py`), the run thread (`service.py`), the backtest thread (`backtest_service.py`), the decision-log reader (`memory_view.py`), the chart data (`chart.py`), the report archive (`archive.py`), safe markdown rendering (`rendering.py`) and the page (`static/`). |
+| `tests/` | The pytest suite. |
+| `main.py` | A minimal programmatic entry point. |
 
 ### Implementation Details
 
@@ -419,3 +458,9 @@ Please reference our work if you find *TradingAgents* provides you with some hel
       url={https://arxiv.org/abs/2412.20138}, 
 }
 ```
+
+## LLM usage monitor
+
+The web console's **Consumi** tab records new LLM calls from the web app, CLI and backtests in SQLite. It shows input/output/cache tokens, cumulative call duration, failures, unfinished calls, per-model totals, filters and CSV export. No prompts or model responses are stored. Existing runs are not backfilled.
+
+The default database is `~/.tradingagents/usage.sqlite`; override it with `TRADINGAGENTS_USAGE_DB_PATH`. All processes must use the same path to share their history. Set model prices in the tab in USD per million tokens. Prices apply to future calls only; each call retains its price snapshot. Unknown usage, missing prices, and subscription calls without a configured price show unavailable cost rather than zero. Cache tokens require a cache price. Totals with unavailable costs are partial estimates, not invoices; SDK-internal retries and provider-specific charges may not be visible. Date filters use UTC. An interrupted process leaves its in-flight calls marked unfinished.

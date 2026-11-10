@@ -6,6 +6,655 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Changes that need action when upgrading are listed under "Upgrading from" in their release.
 
+<!--
+Istruzioni per l'agente AI:
+- Aggiorna la sezione [Unreleased] nella stessa Pull Request che introduce la modifica.
+- Aggiungi solo modifiche effettivamente implementate, non le attività pianificate nel contratto.
+- Usa le categorie Added, Changed, Deprecated, Removed, Fixed, Security quando pertinenti.
+- Descrivi l'effetto per l'utente o il comportamento del sistema, non ogni file toccato.
+- Non inventare PR, issue, URL, versioni, date o esiti dei test.
+- Non spostare le voci in una versione pubblicata senza autorizzazione esplicita.
+- Se una modifica di una PR non viene integrata, non deve apparire nel changelog del branch predefinito (custom).
+-->
+
+## [Unreleased]
+
+## [0.8.0] — 2026-11-10
+
+### Added
+
+- **Version badge in the web console.** The page header shows the running
+  version (e.g. `v0.8.0`) as a pill, and `/api/health` and `/api/options`
+  return it as `version`, so a browser tab can be matched to the build it is
+  served by. The start-up line of `python -m webapp` names the same version.
+- **Every analysis keeps its own record.** `dataflows/run_record.py` writes one
+  file per run under `results_dir/<ticker>/runs/`, addressed by a unique run id
+  (UTC timestamp, ticker, random suffix). Each record carries the run id, the
+  analysis and creation timestamps, the git commit, a build id, the service
+  start time, the Python version, the loaded-validator status, the model
+  configuration, the input snapshot and portfolio, the SEC filings known at the
+  analysis date, the metric registry, the agents' reports, the decision, the
+  risk assessment and the Execution Gate verdict. Records are written
+  owner-only, credentials are redacted, long agent reports are truncated with
+  the truncation recorded, and an existing record is never replaced.
+- **Retention is explicit and bounded.** `run_record_keep` (default `None`,
+  keeps everything) prunes oldest-first per instrument and always keeps the
+  newest record; `run_record_max_text_chars` (default 20,000) caps each stored
+  report.
+- **`/api/health` identifies the running code.** The payload now reports
+  `build.commit`, `build.build_id`, `build.service_started_at`, the interpreter
+  version and a per-component `validators` map stating whether the math engine,
+  valuation, technical, registry, extraction, risk engine, execution gate and
+  arithmetic guard are loaded and expose their expected callables. No paths,
+  environment values or credentials are exposed.
+- **End-to-end reliability suite.** A frozen BRK-B fixture
+  (`tests/fixtures/brkb_2026_11_09.py`) supplies Q3 2026 SEC figures, prices,
+  indicators, an intraday snapshot and a simulated book, alongside expected
+  values computed independently of the code. `tests/test_p4_e2e_brkb.py` drives
+  the whole pipeline over it, `tests/test_p4_determinism.py` repeats the run five
+  times and proves the certified mathematics does not move,
+  `tests/test_p4_negative.py` injects ten named defects and asserts each is
+  caught and never authorized, and `tests/test_p4_execution_boundary.py` spies
+  on the gate and asserts no order is created for an invalid plan.
+- **Deployment verification procedure.** `docs/DEPLOYMENT_VERIFICATION.md`
+  documents how to compare a deployment's target commit against the running
+  process, how to rehearse in an isolated environment, which checks gate the
+  restart, and the rollback path. The restart step is marked as requiring
+  explicit authorization and no script performs it.
+- **A dedicated CI job for the end-to-end suites.** `e2e-reliability` runs the
+  P4, P3, P2 and P1 reliability tests offline on one interpreter, so a P0
+  failure is legible in the checks list rather than buried in the regression
+  job's output.
+
+- **The math engine now runs inside a real analysis.** A finished run reads the
+  labelled figures its analysts stated, computes the valuation multiples with
+  the deterministic engine, and hands the result to the Execution Gate as a
+  certified-metric registry. A multiple quoted in a report is now checked
+  against a computation instead of being taken at its word, and a figure the
+  model authored is marked `LLM_CLAIMED` — reported, never certified.
+- **`dataflows/math/extraction.py`** reads the labelled valuation figures out of
+  the finished reports (price-to-book, EPS trailing and forward, book value per
+  share, consolidated revenue), keeping the label it matched as provenance and
+  applying the modelled scale, so "105,647 million" and "359,5599" are read as
+  the numbers they are.
+- **Portfolio input accepts an equity figure.** `PortfolioContext` carries
+  `equity`, the capital base the exposure caps are a fraction of, distinct from
+  the free cash balance. Sizing is computed from the run's own portfolio rather
+  than skipped.
+- **XBRL concepts keep their meaning.** `dataflows/vendors/concept_resolution.py`
+  classifies revenue tags as consolidated, contract, segment or component, and
+  `sec_edgar._as_of_with_provenance` records the concept, accession, form, period,
+  unit and dimensions with each figure. Candidate tags are ordered by **meaning
+  before spelling**, so a filer's consolidated total outranks a component however
+  the tags are listed. Asking for consolidated revenue from a filer that reports
+  only contract revenue now returns *missing* with the rejected candidate named,
+  rather than substituting the subset.
+- **Bar finality travels with the price.** `dataflows/vendors/bar_finality.py`
+  reports `EOD_CONFIRMED`, `EOD_PENDING_CONFIRMATION`, `INTRADAY_PARTIAL`,
+  `STALE` or `UNKNOWN`, with session date, exchange timezone, observation and
+  source timestamps, last confirmed close, source and calendar. It uses the
+  existing exchange calendar, so holidays and 13:00 closes are honoured. The
+  verified market snapshot now states the bar's finality and, when provisional,
+  instructs the agent not to quote it as a close or derive an end-of-day signal
+  from it.
+
+### Changed
+
+- **A trailing P/E is only certified on a reconciled EPS.** The multiple is
+  registered after the EPS reconciliation, so a price-to-earnings built on a
+  vendor EPS whose denominator is unknown is `UNSUPPORTED` rather than
+  `VERIFIED`. Previously the audit could certify a P/E while marking the EPS
+  behind it unverifiable.
+- **Sizing is attempted whenever a plan has numbers.** The engine runs with a
+  missing budget or missing equity instead of being skipped, so the refusal
+  names its own cause (`RISK_BUDGET_MISSING`, `PORTFOLIO_CONTEXT_MISSING`)
+  instead of being reported as an unrelated gate reason. The audit's
+  `qty_proposed` and `planned_risk` are populated when a size exists.
+
+### Fixed
+
+- **A misspelt portfolio field fails at the edge.** `PortfolioContext` rejects
+  unknown keys instead of ignoring them: an earlier revision dropped `equity`
+  silently, which left every plan unsized with no visible cause.
+- **The metric registry is populated for real runs.** Extraction feeds
+  `build_run_registry`, which previously read only state keys no node wrote, so
+  every valuation metric came out `NOT_COMPUTABLE` and no figure was ever
+  checked.
+- **A numeric capture group that can be absent no longer raises.** The forward
+  EPS pattern alternates between a plain and a tabular shape; reading a fixed
+  group made extraction throw whenever the second shape matched.
+- **`359,5599` is read as a decimal, not as 3,595,599.** Four or more digits
+  after a comma cannot be a thousands group, and treating it as one inflated a
+  per-share value by four orders of magnitude.
+
+- **XBRL concepts keep their meaning.** `dataflows/vendors/concept_resolution.py`
+  classifies revenue tags as consolidated, contract, segment or component, and
+  `sec_edgar._as_of_with_provenance` records the concept, accession, form, period,
+  unit and dimensions with each figure. Candidate tags are ordered by **meaning
+  before spelling**, so a filer's consolidated total outranks a component however
+  the tags are listed. Asking for consolidated revenue from a filer that reports
+  only contract revenue now returns *missing* with the rejected candidate named,
+  rather than substituting the subset.
+- **Bar finality travels with the price.** `dataflows/vendors/bar_finality.py`
+  reports `EOD_CONFIRMED`, `EOD_PENDING_CONFIRMATION`, `INTRADAY_PARTIAL`,
+  `STALE` or `UNKNOWN`, with session date, exchange timezone, observation and
+  source timestamps, last confirmed close, source and calendar. It uses the
+  existing exchange calendar, so holidays and 13:00 closes are honoured. The
+  verified market snapshot now states the bar's finality and, when provisional,
+  instructs the agent not to quote it as a close or derive an end-of-day signal
+  from it.
+
+### Fixed
+
+- Berkshire's Q3 2026 revenue resolved to 74,322 (contract revenue) because the
+  tag list put a component before `Revenues`, and the resolver kept the first tag
+  that reported a period. The filing states 105,647 as the consolidated total;
+  that is what the row now reports, and the YoY growth against 94,972 is 11.24%.
+  A component is still identifiable as contract revenue, never renamed as the
+  total.
+- A daily candle read during the session was presented as a verified close. The
+  2026-11-09 reports at 18:37, 19:24 and 21:01 Rome (12:37, 13:24, 15:01 New
+  York) all fell inside the session and are now labelled `INTRADAY_PARTIAL`.
+
+- **A metric registry reaches the Execution Gate.** `record_decision` built no
+  registry, so the claims validator could verify nothing and every run blocked
+  with `NUMERIC_CLAIM_UNVERIFIABLE` — the F6 defect the data lineage audit
+  found. `dataflows/math/run_registry.py` now builds a registry per run from the
+  engine's own computations and `_evaluate_reliability` supplies it. A run with
+  no certified metric blocks with `NO_CERTIFIED_METRIC`.
+- **Report generation and execution authorization are separate outcomes.** A
+  run whose numbers cannot be certified still produces a report explaining the
+  problem (`COMPLETED` / `COMPLETED_WITH_WARNINGS` / `FAILED`) while the order is
+  refused (`APPROVED` / `BLOCKED` / `NOT_APPLICABLE`). A `WAIT` is
+  `NOT_APPLICABLE`, not a refusal.
+- **Build identification in the health endpoint.** `/api/health` reports the
+  commit it was built from and the moment the process loaded its modules. A
+  process started before a deployment keeps its old code, and start time alone
+  could not prove which code was live; the two identifiers together make a stale
+  service visible.
+
+### Fixed
+
+- A metric that could not be computed (`NOT_COMPUTABLE`) no longer counts as a
+  contradiction. It stays unusable — and a decision resting on no certified
+  metric is blocked — but a missing input is a gap to report, not a wrong figure
+  to stop on. Treating the two alike is what made every run fail.
+
+- **Deterministic arithmetic validator (P0-B).** New module
+  (`tradingagents/dataflows/arithmetic.py`): percentage moves and distances
+  from reference levels are computed as
+  `(current / reference - 1) * 100`, with intraday open→close and
+  close→close kept as distinct metrics. A percentage the report states that
+  contradicts the data beyond tolerance is `ARITHMETIC_MISMATCH` and blocks;
+  a price and an indicator from different sessions are
+  `PRICE_TIMESTAMP_MISMATCH` and block too. The 2026-11-08 report's
+  -11.3% / +4.5% / +12.1% figures are rejected against the correct
+  -2.63% / +14.70% / +23.03%. Wired into `evaluate_decision` via
+  `price_snapshot` + `stated_percentages`, with the verdicts recorded in
+  the audit's `data_quality.arithmetic` section.
+- **Multi-tranche risk engine (P0-C).** New
+  `risk_engine.tranche_risk` prices each leg on its own entry and stop
+  (a leg entered lower never inherits the first leg's risk), flags a stop
+  tighter than the policy minimum (`STOP_TOO_TIGHT_FOR_POLICY`) and a
+  wrong-side stop (`INVALID_STOP_SIDE`). New
+  `risk_engine.aggregate_tranche_risk` sizes every leg and enforces the
+  aggregate risk and notional budgets *including* open positions and open
+  orders; a budget-exhausted alternative leg is skipped rather than
+  failing the plan.
+- **Structured execution verdict (P0-D).** New module
+  (`tradingagents/dataflows/execution_verdict.py`): every run produces a
+  machine-readable verdict (`run_id`, `instrument`, `analysis_as_of`,
+  `strategic_rating`, `execution_action`, `execution_approved`,
+  `authorized_orders`, `blocking_reasons`, `checked_at`,
+  `policy_version`). The constructor refuses contradictions — an
+  order-bearing action cannot carry blocking reasons, and a blocked or
+  waiting verdict cannot carry orders — so no LLM can make an unvalidated
+  order look authorized. Written to the audit JSON under
+  `execution.verdict`.
+- **P0 regression and safety suites.** `tests/test_p0_final_hardening.py`
+  (FRESH_01–06, ARITH_01–06, RISK_01–08, EXEC_01–09 plus a four-ticker
+  parameterised run) and `tests/test_p0_paper_safety.py` (a mock paper
+  broker records zero orders whenever any critical check fails, and one
+  order only when every gate passes).
+
+### Changed
+
+- **CI gains a P0 reliability job.** `.github/workflows/ci.yml` runs the
+  offline P0 suites (`reliability-regression`) on every pull request; a
+  regression there fails the build. The suites need no network, no LLM, no
+  SEC credentials and no broker.
+- **The data-quality checks run before synthesis, not only at the gate.**
+  New `tradingagents/graph/data_quality_node.py` and
+  `tradingagents/dataflows/data_gate.py` place the freshness and arithmetic
+  verdicts between the analysts and the research debate, so the Research
+  Manager and Portfolio Manager are told which figures the data does not
+  support instead of debating them as verified. The findings are carried in
+  the state as a binding notice; the Execution Gate **reuses** the same
+  verdicts rather than recomputing, so what the agents were told and what
+  the gate decides cannot diverge. A provider failure yields no filings,
+  which the check reports as unavailable — never a silent pass.
+
+- **SEC filing freshness gate (P0.1).** New deterministic module
+  (`tradingagents/dataflows/filing_freshness.py`): identifies the most
+  recent authoritative filing (company release or SEC filing, with
+  `filing_date`, `accepted_at`, `period_end`, `form_type`,
+  `accession_number`, source and retrieval timestamp) known at the
+  analysis date, and compares it against the period the fundamentals
+  analyst actually used. A vendor serving Q2 while the Q3 filing is
+  already public yields `STALE_FUNDAMENTALS`; no known filing or an
+  undatable report yields `FUNDAMENTALS_UNAVAILABLE` — both block the
+  decision's execution vocabulary. No look-ahead: a filing dated after
+  the analysis date is invisible, keeping backtests honest. The gate runs
+  automatically in `record_decision` (point-in-time extraction from SEC
+  EDGAR; the used period is read from the run's own fundamentals report)
+  and can be disabled with `fundamentals_freshness_gate: false`.
+- **Shared financial fact registry (P0.2).** New deterministic module
+  (`tradingagents/dataflows/fact_registry.py`): every agent's material
+  financial facts are registered with full scope (metric, value, unit,
+  currency, period, segment, definition, source). Same-scope values are
+  compared; scope differences (Q2 vs Q3, GAAP vs operating) are never
+  conflated into conflicts. Units are normalized to a common base before
+  comparison — 9.6 USD_billion and 9,600 USD_million are the same fact
+  stated differently, and a unit difference alone is recorded as
+  `UNIT_MISMATCH` context on the conflict, never silently ignored. An
+  absence never refutes a sourced value. A consensus/estimate EPS
+  compared against an actual of another definition is
+  `METRIC_DEFINITION_MISMATCH` — no certified "beat". Conflicts resolve
+  only via a verified primary source; unresolved ones block. Diagnostic
+  codes: `FACT_CONFLICT`, `FACT_CONFLICT_UNRESOLVED`, `PERIOD_MISMATCH`,
+  `UNIT_MISMATCH`, `METRIC_DEFINITION_MISMATCH`,
+  `UNVERIFIED_FINANCIAL_METRIC`, `PRIMARY_SOURCE_WINS`. The registry
+  populates automatically from the run's own reports via
+  `dataflows/claim_harvester.py` (labelled metric patterns only, bare
+  numbers never guessed; harvested facts are unverified by construction —
+  harvesting proves what an agent asserted, not that it is true).
+- **Valuation reconciliation (P0.3).** New module
+  (`tradingagents/dataflows/valuation.py`): book value per share, market
+  cap and P/B computed only after currency and share-class consistency
+  pass; a cross-class book value without a conversion ratio is refused,
+  never silently converted.
+- **Exposure-capped position sizing (P0.5).** New
+  `risk_engine.size_with_exposure_cap`: sizing applies the stop-distance
+  budget AND the per-symbol notional cap simultaneously and reports which
+  bound. The 100k/1%/560/552.07 scenario yields 8 shares (4,480 USD)
+  under a 5% cap instead of ~126 shares (~70,600 USD) from the
+  stop-distance alone. Missing portfolio context never invents a size
+  (`PORTFOLIO_CONTEXT_MISSING`); wrong-side stops block per direction
+  (`risk_engine.validate_stop_side`). The sizing runs automatically in
+  the real flow: the plan's numbers (entry/stop/ATR/direction) are
+  extracted from the Trader's own plan text by
+  `dataflows/plan_extraction.py` — labelled patterns only, bare numbers
+  in prose never guessed — and the audit's `risk` section records the
+  capped quantity, notional and which constraint bound.
+- **Final order reconciliation (P0.6).** New module
+  (`tradingagents/dataflows/order_reconciliation.py`): the Portfolio
+  Manager's decision prevails over the Trader's earlier proposal; any
+  revision to quantity/entry/stop/side voids prior authorizations and
+  requires full revalidation; a HOLD decision reconciles to a
+  zero-quantity, unauthorized candidate — a HOLD never becomes a BUY or
+  SELL.
+- **P0 gates wired into the decision point.**
+  `gate_integration.evaluate_decision` accepts the freshness inputs, a
+  fact registry report and the position direction; stale fundamentals, an
+  unresolved material conflict or a wrong-side stop each BLOCK with
+  stable reason codes, and the audit JSON carries the verdicts under
+  `data_quality`.
+
+- **Download button for the markdown report.** The web console's run and
+  archive panels gain a **⤓ Download markdown** button that saves the
+  consolidated markdown report as a file (`<TICKER>_<DATE>_report.md`)
+  instead of opening it in a browser tab: the markdown endpoints
+  (`/api/runs/{id}/report.md`, `/api/archive/{id}/report.md`) accept
+  `?download=1` and serve a `Content-Disposition: attachment` header with
+  the report's filename. The existing "Open HTML report" and "Markdown"
+  links are unchanged (inline by default), so both opening and saving the
+  report remain available.
+
+- **Instrument Profiler.** A vendor-data-driven instrument classifier
+  (`tradingagents/dataflows/instrument_profiler.py`) so the reliability
+  layers behave uniformly for any instrument — US mega-caps, dual-class
+  shares, Milan-listed utilities, London minor-unit quotes, crypto pairs,
+  indices and forex — with no per-ticker tables. It derives the instrument
+  kind from the vendor's `quoteType` (with structural fallbacks: `=X`
+  forex, `^` index, known crypto bases), the quote and financial
+  currencies (`currency` / `financialCurrency`, with a conversion factor
+  for minor-unit quotes like GBp→GBP), and the share class structurally
+  from the ticker's explicit suffix (`BRK-B` → root `BRK`, class `B`;
+  `NVDA` is never read as `NVD` class `A`). A data-quality label
+  (`COMPLETE`/`PARTIAL`/`UNKNOWN`) is the caller's fail-closed signal.
+
+### Changed
+
+- **Ticker-identity and currency checks are profile-driven.**
+  `validator.check_ticker_identity` accepts an `InstrumentProfile`: a
+  sibling-class symbol served by the vendor (asked BRK-B, served BRK-A) is
+  an error via structural detection instead of a hardcoded sibling table;
+  without a profile, a bare string mismatch stays a normalization warning.
+  New `validator.validate_currency_consistency` checks a price's currency
+  against a metric's: a minor-unit quote (GBp) against main-unit
+  financials (GBP) passes with the profiler's conversion factor, a real
+  mismatch (USD price vs EUR financials on ENI.MI) is an error, and
+  unknown currencies are `UNVERIFIED` rather than errors.
+
+### Added
+
+- **Execution Gate wired into the run flow.** Every finished run is now
+  evaluated through the Execution Gate and audited
+  (`tradingagents/dataflows/gate_integration.py`, called from
+  `TradingAgentsGraph.record_decision`): the gate's verdict is attached to
+  the run state (`execution_action`, `execution_reason_codes`) and the
+  audit JSON is written beside the state log under
+  `results_dir/<ticker>/reliability_audit/`. The decision itself is still
+  recorded and reported exactly as before — the gate governs the execution
+  vocabulary, not reporting — and a reliability-layer failure is logged
+  and skipped rather than losing the run's reports or memory entry. An
+  unreadable rating blocks rather than being guessed (#1170); plan numbers
+  absent from the decision skip the risk check instead of being invented.
+
+### Added
+
+- **Walk-forward validation (Phase 7).** A pure fold-and-score module
+  (`tradingagents/dataflows/walk_forward.py`) for historical out-of-sample
+  validation without look-ahead: folds cut a historical range so each
+  train window ends strictly before its test window, and the memory log's
+  `as_of` guard (lessons resolved by `train_end`) is the enforcement point
+  for what a test-window decision may learn from. Scoring is honest by
+  construction: pending cells are counted and excluded from averages,
+  never folded in as zero; a rating with fewer than 5 settled samples is
+  labelled `insufficient` instead of reporting a noisy hit rate; `Hold`
+  claims no direction so nothing about alpha proves it right or wrong;
+  alpha is measured from the first close *after* each analysis date over a
+  declared holding window against a declared benchmark, and the summary
+  states that basis with the caveat that one model sampling per cell is
+  indicative rather than repeatable.
+
+### Added
+
+- **Structured audit trail (Phase 6).** An audit record
+  (`tradingagents/dataflows/audit.py`) assembles the earlier phases' typed
+  verdicts — provenance, causal guard, stop validation, sizing, portfolio
+  risk, execution gate, strategic decision, fact check — into the
+  contract's machine-readable schema (`schema_version` 1.0), produced
+  alongside the human report. Fields the run did not produce stay `None`,
+  never invented; the run id is derived deterministically from ticker,
+  analysis date and snapshot id so re-auditing is idempotent; model and
+  provider names are recorded, key material never is. A few-second human
+  summary separates the opinion (`OVERWEIGHT`) from the execution action
+  (`WAIT`/`BLOCK`) and names the blocking refuted claims, so a reader can
+  tell an opinion from a plan from an order at a glance.
+
+### Added
+
+- **Independent Fact Checker and bounded debate (Phase 5).** A claim-level
+  checker (`tradingagents/dataflows/fact_checker.py`) classifies every
+  material claim (`FACT`, `DERIVED_CALCULATION`, `CAUSAL_INFERENCE`,
+  `HYPOTHESIS`, `FORECAST`, `UNSUPPORTED`) and checks it against the run's
+  verified facts: a causal claim like "the market has already absorbed the
+  Q3" is refuted with `EVENT_AFTER_LAST_MARKET_SESSION` when no post-event
+  session exists; a fact presented without supporting fact ids is refuted;
+  support resting on unverified or quarantined facts downgrades the claim.
+  A refuted *blocking* claim stops the decision. A debate controller
+  (`tradingagents/dataflows/debate.py`) ends rounds that add no new
+  evidence, no verifiable rebuttal and no concrete plan change (the
+  repeating-the-opening-claim failure), keeps the round cap configurable,
+  and separates rating disagreement (opinions may differ) from trigger
+  disagreement (must resolve or the decision blocks). A refuted claim is
+  checkably barred from returning as fact.
+
+### Added
+
+- **Separated portfolio decision (Phase 4).** A typed decision model
+  (`tradingagents/dataflows/portfolio_decision.py`) keeps the contract's
+  three levels distinct: strategic rating (`UNDERWEIGHT/NEUTRAL/OVERWEIGHT`
+  over a declared horizon), investment intent
+  (`AVOID/MONITOR/ACCUMULATE_CONDITIONALLY/MAINTAIN/REDUCE`), and execution
+  action (`WAIT/BLOCK/PROPOSE_PAPER_ORDER/SUBMIT_PAPER_ORDER`, filled only
+  by the Execution Gate). Legacy 5-tier labels (`Buy`/`Hold`/…) map
+  explicitly with the original label preserved on the decision — `Buy`
+  becomes `OVERWEIGHT` + `ACCUMULATE_CONDITIONALLY`, never a market order —
+  and unknown labels are refused for review rather than guessed. An
+  `OVERWEIGHT` rating now visibly coexists with a `WAIT` action in the
+  rendered decision, ending the report practice of treating `HOLD`, `BUY`
+  and `Overweight` as equivalent actions.
+
+### Added
+
+- **Execution Gate (Phase 3).** A deterministic gate
+  (`tradingagents/dataflows/execution_gate.py`) sits between a proposed plan
+  and any paper order. It consumes only the typed verdicts of the earlier
+  phases — never LLM prose — and emits `WAIT` (no trigger yet),
+  `BLOCK` (invalid plan or missing mandatory data) or
+  `PROPOSE_PAPER_ORDER`. `WAIT` and `BLOCK` create zero orders, pending
+  conditional ones included. A strategic `OVERWEIGHT` rating with an
+  unmet entry trigger now ends in `WAIT` with explicit reason codes
+  (`ENTRY_TRIGGER_NOT_MET`, `POST_EARNINGS_REACTION_UNOBSERVABLE`,
+  `MARKET_CLOSED`); the same plan with the trigger met while the post-event
+  reaction is still unobservable hard-`BLOCK`s. Submission is a separate,
+  revalidated, idempotent step: a stale signal or a non-proposal decision
+  is refused, and a retry with the same plan key returns the original
+  order (`DUPLICATE_ORDER`) instead of creating a second one.
+
+### Added
+
+- **Deterministic risk engine (Phase 2).** A pure, typed risk engine
+  (`tradingagents/dataflows/risk_engine.py`) computes position sizing, stop
+  validation and gap/slippage stress in code, never in LLM prose. Stop
+  validation requires an entry-to-stop buffer of at least 0.5 ATR
+  (parametric): the BRK-B plan of 543.70/543.50 with ATR 9.408 (~0.021 ATR)
+  now fails deterministically with `STOP_BUFFER_TOO_TIGHT`. Sizing uses the
+  *stressed* exit price — stop less a gap allowance and slippage — so
+  `qty = floor(risk_budget / stressed_risk_per_share)`; a missing budget
+  yields zero size (`RISK_BUDGET_MISSING`), never a guess. Portfolio-level
+  checks keep `max_portfolio_loss_fraction` as `None` when equity is
+  unknown: a loss quoted against a standard allocation is never converted
+  to a fraction of total wealth without the real base.
+
+### Added
+
+- **Data validation layer (Phase 1).** A provenance registry
+  (`tradingagents/dataflows/provenance.py`) records where each material fact
+  came from, its publication and retrieval times, and its verification
+  status: facts without a verified publication time are `UNVERIFIED` and
+  cannot feed a decision; contested ones are `QUARANTINED`. An event-to-price
+  causal guard (`tradingagents/dataflows/causal_guard.py`) answers
+  deterministically whether post-event prices exist — `NOT_YET_OBSERVABLE`,
+  `OBSERVABLE` or `INSUFFICIENT_DATA` — so a claim like "the stock absorbed
+  the earnings" is checkable against the market calendar instead of asserted.
+  A deterministic validator (`tradingagents/dataflows/validator.py`) checks
+  OHLC consistency, reconciles vendor metrics across units with a
+  materiality threshold, and blocks cross-share-class comparisons (e.g. a
+  BRK-B price against BRK-A book value) until converted. The news analyst
+  gains a `check_event_pricing` tool and is instructed to call it before
+  attributing any price move to a published event.
+
+### Added
+
+- **Reliability baseline (Phase 0).** Frozen BRK-B regression fixture for the
+  2026-11-08 report case (`tests/fixtures/brk_b_2026_11_08.py`) and a
+  deterministic regression suite (`tests/test_reliability_baseline.py`, 14
+  tests) pinning the temporal facts the reliability contract requires: the Q3
+  release postdates the last completed session, no post-event price exists at
+  report time, the Friday close-to-close move is ~-0.25% (not -0.01%), the
+  543.70/543.50 tranche-stop plan sits at ~0.021 ATR (far below the 0.5 ATR
+  minimum buffer), and strategic ratings share no vocabulary with execution
+  actions. A safety audit test verifies the codebase holds no broker SDK or
+  order-submission symbol and that the shared HTTP helper is read-only
+  (GET/HEAD only).
+
+- The web console runs backtests: a **Backtest** tab drives the CLI's `backtest`
+  command over a grid of tickers and dates, shows each cell as it runs and the
+  per-rating score once settled. One sweep at a time, into its own memory log
+  under `results_dir/backtest/`, so the live log real runs read back stays clean.
+- The web console shows the decision log: a **Decision log** tab lists every
+  recorded decision with its outcome and reflection, and **Settle pending**
+  runs the same settlement pass a run performs at its start, so decisions whose
+  holding window has traded get their outcome without waiting for the next run.
+- The web console keeps several analyses side by side: the History tab lists
+  every run this process has started, and picking one shows it while the others
+  keep going, instead of one run replacing the next.
+- The web console's report panel draws the ticker's daily closes around the
+  analysis date as a small chart, fetched through the same point-in-time vendor
+  path the agents use, so a historical run never sees a later bar.
+- The web console's archive gains **Re-run**, which pre-fills the form from the
+  open report's header (ticker, date, analysts, depth, models), and
+  **Compare**, which reads two reports of the same ticker side by side, agent
+  by agent.
+- The web console remembers the form's answers in the browser, so a reload
+  keeps the provider, models, depth and language that were chosen.
+- The web console's report panel renders the agents' markdown as formatted text
+  — headings, tables, lists, quotes and code — instead of showing it raw. The
+  rendering reuses the safe `markdown-it` configuration of the saved HTML report
+  (raw HTML escaped, images off), so nothing a model wrote can inject markup.
+- Italian is offered in the output-language menu, in the CLI and the web console
+  alike. Both now read one shared list (`cli.prompts.OUTPUT_LANGUAGES`), so a
+  language added there appears in both and they cannot drift apart.
+- A local web console (`python -m webapp`, or `pip install ".[web]"` and
+  `tradingagents-web`) offering the CLI's analysis in a browser: the same
+  ticker, date, analyst, depth, language, provider and model choices, a live
+  agent/message view, and the same saved reports. It imports the CLI's checks,
+  live state and report writer without changing them, binds to loopback only,
+  and reuses the same `results_dir` artifacts a CLI run produces.
+
+### Added
+
+- **Mathematical tools for the analysts.** Eighteen typed tools
+  (`tradingagents/agents/math_tools.py`) let an agent *ask for* a number
+  instead of computing one: percentage changes, CAGR, P/B, book value per
+  share, P/E and earnings yield, EPS on weighted-average shares, technical
+  indicators, price distances, stop distances, ATR-implied stops, risk/reward,
+  unit conversion, and validators for stated multiples, stated percentages,
+  market bars, market series and trade proposals. Each returns structured
+  JSON with `value`, `formula_id`, `operands` and a calculation status, never
+  a bare number a model could restate. The market analyst receives the
+  measurement tools and the fundamentals analyst the valuation tools, so a
+  distance from a moving average or a price-to-book is certified rather than
+  estimated in prose.
+- **Market session status.** `tradingagents/dataflows/math/session.py`
+  distinguishes a final end-of-day close from a bar that is still forming, and
+  reports `market_session_status`, `bar_timestamp`, `is_complete`, `is_final`
+  and `last_completed_session`. A date-only bar is judged as its whole session
+  rather than as midnight, so a past daily bar is complete while the running
+  session's is not. `assess_series` reports `includes_partial_bar` so an
+  indicator can declare that it was computed over a price still moving.
+- **Certified metric lookup.** `get_certified_metric` reads a value from the
+  run's registry, and answers `UNSUPPORTED` for a metric the engine never
+  computed — so a report cannot quote a number nobody verified.
+- **Metric definition reconciliation.** `tradingagents/dataflows/math/definitions.py`
+  decides whether two figures may be combined, refusing a segment total
+  against a consolidated one, GAAP against adjusted, a quarter against a TTM
+  figure, differing currencies or unit scales, and a per-share figure built on
+  end-of-period instead of weighted-average shares. This is the one check
+  arithmetic cannot provide: dividing 105,647 by 74,322 is flawless and
+  meaningless, so the block must come from comparing what the figures mean.
+  Differing *quarters* remain compatible — a year-over-year comparison is the
+  purpose of having period labels; a quarter against a trailing year is not.
+- **Analyst report validation.** `dataflows/math/report_validation.py` reads
+  each analyst's finished report, extracts the figures that carry a label and
+  checks them against the run's certified metrics, so the constraint on agent
+  arithmetic lives in code rather than in a prompt asking the model not to
+  calculate. A figure the engine computed and the report got wrong blocks the
+  decision. A figure with no certified counterpart does not block by itself
+  and is reported as `is_validated: false`: before any metric is registered
+  every labelled number would be unverifiable, and blocking on those would
+  fail every run including the valid path.
+
+### Fixed
+
+- A LONG stop above its entry, or a SHORT stop below it, is refused rather than
+  measured: the distance from such a pair looks plausible while the plan
+  protects nothing.
+- `check_claim` compared a `Decimal` against a claimed `float`, raising
+  `TypeError` whenever a claim was built from a tool argument rather than
+  parsed from prose. Both sides are converted once, so the comparison is
+  always exact.
+
+### Added
+
+- **Financial Math Engine.** A dedicated package (`tradingagents/dataflows/math/`)
+  that owns every financial calculation the application performs, so no
+  quantity, multiple, percentage or risk figure is produced by a language
+  model. Monetary math uses `Decimal` with explicit rounding and carried
+  units; each derived metric is a record with its formula, operands, period
+  and a verified/refused status, so the audit can reproduce it. Refusals are
+  kept rather than dropped, letting a report show the rejected figure next to
+  the computed one. Covers arithmetic and unit conversion, valuation metrics
+  (market cap, EPS GAAP/adjusted, P/E trailing/forward, P/B, D/E, ROE, ROA,
+  dual-class book value), technical indicators (SMA, EMA, VWMA, ATR, RSI,
+  MACD, Bollinger/%B), numeric-claim validation and cross-report consistency
+  checking. See `docs/financial-math-engine.md`.
+- **Mathematical execution gate.** A contradicted or unverifiable figure now
+  blocks a paper order with the specific hazard named
+  (`INVALID_PRICE_TO_BOOK`, `INVALID_STOP_ATR_DISTANCE`,
+  `NUMERIC_CLAIM_CONTRADICTED`, `NUMERIC_CLAIM_UNVERIFIABLE`), and these
+  reasons cannot be downgraded to a WAIT: a wrong number does not become
+  right later. Verified by an end-to-end test in which reports carrying the
+  2026-11-08 figures (P/B 1.35x, "2.5 ATR" stop, -11.3% from the high) send
+  **zero** orders to a mock paper broker, while the same plan with sound
+  arithmetic sends exactly one.
+
+### Fixed
+
+- A price-to-book a report states is checked against price and book value
+  instead of being trusted: 570.89 / 385.70 = 1.4801, so the reported 1.35x
+  is now refused and both figures are recorded in the audit.
+- A stop's stated ATR distance is checked against its own entry, stop and
+  ATR: entry 557.00, stop 547.40 and ATR 9.408 give 1.02 ATR, so a reported
+  2.5 ATR is refused. Wrong-side stops are reported as contradictions for
+  both directions.
+- A valuation built on a stale accounting period (Q2 book value applied to a
+  Q3 analysis) is refused rather than presented as current.
+- Percentages an agent states are compared against the engine's own
+  computation, and a disagreement is recorded as a refused claim rather than
+  silently corrected.
+- The test and lint CI jobs pass again, so they can gate merges. The test job
+  installed only the `dev` extra while two suites import `fastapi`, which
+  lives in `web`: collection aborted on every Python version before running a
+  single test. The lint job reported 27 findings that pre-date this work —
+  mechanical ones (unused imports, import ordering, a missing trailing
+  newline) plus an unused local, an ambiguous `l` renamed to `low`, three
+  `try/except/pass` blocks written with `contextlib.suppress`, and two
+  `dict()` calls written as literals. Behaviour is unchanged.
+- A push to `custom`, the integration branch, now runs CI. Previously only
+  `main` and version tags were covered, so a merge into `custom` landed
+  unvalidated.
+
+### Added
+
+- **Trade actions, separate from ratings.** `dataflows/math/trade_actions.py`
+  introduces OPEN_LONG, REDUCE_LONG, CLOSE_LONG, OPEN_SHORT, REDUCE_SHORT,
+  CLOSE_SHORT and WAIT, and the rules that make each checkable. A strategic
+  rating permits candidate actions but never implies one: a bare SELL or BUY
+  names a direction, not a book operation, so it maps to no action — which is
+  what stops a SELL becoming an OPEN_SHORT. A reduction applies its fraction
+  to the held quantity, so 40% of 10 shares is 4 and never 40% of an unknown
+  base; a reduction on a flat book or with an unknown portfolio blocks rather
+  than yielding a zero that looks like a decision.
+- **Code-generated technical audit section.** The audit JSON now carries a
+  `technical_audit` block listing the last confirmed EOD bar, the intraday bar
+  status, the fundamentals period used and its reconciliation, the count of
+  mathematical findings, the invalidated metrics, the numeric claims checked
+  and blocking, the risk verdict, the execution action and the blocking
+  reasons. Every field derives from a verdict the run produced; a missing one
+  stays null rather than being reported as passed.
+
+### Fixed
+
+- A percentage claim can now say which denominator it used. Measuring a price
+  against a level and a level against a price give +4.87% and -4.64% for the
+  same two numbers, because a percentage change is not symmetric; the engine
+  previously had one convention, so it would have rejected the correct
+  Bollinger figure. `distance_from_level` and `level_distance_from_price` are
+  now distinct, and the tool takes the denominator as an argument.
+- Bollinger bands expose two widths under different names with their
+  denominators stated: `bandwidth_pct` against the middle (12.31% on the
+  19:24 figures) and `width_over_price_pct` against the price (11.73%).
+- The numeric claim extractor recognizes EPS and VIX change phrasings
+  ("EPS contracts 37%", "VIX rose 58%"). Before this, such a claim produced
+  nothing, so a mismatch could not have been caught.
+- `NUMERIC_CLAIM_MISMATCH` is a distinct gate reason for a claimed rate the
+  engine disproves, and the finding records the claiming agent alongside the
+  stated and computed values.
+
 ## [0.7.1] — 2026-10-27
 
 Decisions are scored only on final closes and settle across long market holidays, a model's unpadded date no longer reads filings made after the run date, and fixes to portfolios, prices, SEC statements, reports, Azure and Claude settings.
