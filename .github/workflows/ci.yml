@@ -153,4 +153,7 @@ jobs:
             tests/test_p4_execution_boundary.py \
             tests/test_p3_math_wiring.py \
             tests/test_p2_financial_data_integrity.py \
-            tests/test_p1_runtime_gate_integration.py
+            tests/test_p1_runtime_gate_integration.py \
+            tests/test_p6_e2e_certification.py \
+            tests/test_p5_risk_order_gate.py \
+            tests/test_p4_certified_metrics.py
