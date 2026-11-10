@@ -563,3 +563,65 @@ class TestSentenceBoundaryThroughTheGate:
         codes = [f.code for f in record.math_verdict.report.findings]
         assert "NUMERIC_CLAIM_MISMATCH" not in codes
         assert decision.creates_order is True
+
+
+class TestQualifiersAfterAComma:
+    """A comma may introduce an appositive qualifier rather than end a clause.
+
+    `_PE_QUALIFIER_STOP` held `,` in a plain character class, so every comma was
+    a boundary: `P/E 18.2x, forward` was read as a current trailing claim and
+    produced a false MISMATCH. The comma has three roles — clause separator,
+    appositive introducer, Italian decimal mark — and a character class cannot
+    tell them apart.
+    """
+
+    def _trailing(self, text):
+        return [str(c.value) for c in extract_claims(text, "f")
+                if c.label == "pe_trailing"]
+
+    def test_a_comma_then_forward(self):
+        assert self._trailing("P/E 18.2x, forward") == []
+
+    def test_a_comma_then_a_fiscal_year(self):
+        assert self._trailing("P/E 18.2x, FY2024") == []
+
+    def test_a_comma_then_italian_historical(self):
+        assert self._trailing("P/E 18,2x, storico") == []
+
+    def test_a_comma_then_a_conjunction_is_a_boundary(self):
+        """`while` starts a new clause; the figure before it stands."""
+        assert self._trailing(
+            "P/E 18.2x, while forward outlook improved") == ["18.2"]
+
+    def test_a_comma_then_a_new_pe_label_is_a_boundary(self):
+        """`Forward P/E 25.4x` is another claim, not this one's qualifier."""
+        assert self._trailing(
+            "Trailing P/E 18.2x, Forward P/E 25.4x") == ["18.2"]
+
+    def test_the_italian_decimal_comma_is_not_a_boundary(self):
+        """`18,2` is a number; the comma inside it separates nothing."""
+        assert self._trailing("P/E 18,2x, storico") == []
+        assert self._trailing("P/E 18,2x, trailing") == ["18.2"]
+
+    def test_a_comma_then_a_trailing_qualifier_is_kept(self):
+        assert self._trailing("P/E 25.4x, trailing") == ["25.4"]
+
+
+class TestCommaThroughTheGate:
+    def test_a_comma_forward_does_not_produce_a_false_mismatch(self):
+        record, decision = _gate_with("P/E 18.2x, forward")
+        codes = [f.code for f in record.math_verdict.report.findings]
+        assert "NUMERIC_CLAIM_MISMATCH" not in codes
+        assert decision.creates_order is True
+
+    def test_a_trailing_figure_still_blocks_when_wrong(self):
+        record, decision = _gate_with("Trailing P/E 18.2x")
+        assert decision.creates_order is False
+        assert decision.action.value == "BLOCK"
+        codes = [f.code for f in record.math_verdict.report.findings]
+        assert "NUMERIC_CLAIM_MISMATCH" in codes
+
+    def test_a_comma_historical_figure_does_not_block(self):
+        record, decision = _gate_with("P/E 18,2x, storico")
+        codes = [f.code for f in record.math_verdict.report.findings]
+        assert "NUMERIC_CLAIM_MISMATCH" not in codes

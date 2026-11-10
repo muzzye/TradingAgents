@@ -342,27 +342,110 @@ _PE_HISTORICAL = re.compile(
 
 # A sentence boundary is a period/newline/semicolon **not** sitting between two
 # digits. `.` inside `25.4` is a decimal point, not a full stop: stopping there
-# Where a qualifier stops describing a figure: a clause separator.
+# The words that qualify a multiple. Used twice: to recognise a qualifier and,
+# for a comma, to decide whether it introduces one.
+_PE_QUALIFIER_WORDS = (
+    r"forward", r"atteso", r"previsto", r"expected", r"estimat\w*",
+    r"prospett\w*", r"next\s+(?:year|fiscal|quarter)", r"FY\s*20\d\d",
+    r"histor\w*", r"storic\w*", r"past", r"previous", r"precedente",
+    r"anno\s+scorso", r"trailing",
+)
+
+# A period ends the clause unless it sits between two digits, where it is a
+# decimal point. `(?<!\d)\.|\.(?!\d)` covers both sides; requiring a non-digit
+# *before* the period (an earlier version) missed `25.4. Forward ...` entirely.
 #
-# A period is a decimal point only when it sits *between two digits*, so every
-# other period ends the clause. The previous rule required a non-digit before the
-# period, which meant `P/E 25.4. Forward outlook...` had no boundary after the
-# number — the next sentence's `Forward` then entered the scope and silently
-# dropped a correct claim. Reading the condition backwards is what caused it.
-#
-# The Italian conjunctions `e`/`ma` must be surrounded by spaces: `\be\b`
-# matches the `E` of `P/E`, splitting the label itself into a prefix and
-# disabling the qualifier check on every claim.
-_PE_QUALIFIER_STOP = re.compile(
-    r"[;,\n]|(?<!\d)\.|\.(?!\d)"
-    r"|\b(?:and|while|but|whereas)\b"
-    r"|(?<=\s)(?:e|ma)(?=\s)",
+# A comma is different, and that difference is the point: it separates clauses
+# *or* introduces an appositive qualifier — "P/E 18.2x, forward" is one figure
+# with a qualifier. It also has a third role as the Italian decimal mark. So a
+# comma is a boundary only when what follows it is neither a qualifier nor a
+# digit; both are checked in `_pe_suffix_end`.
+_PE_PERIOD_STOP = re.compile(r"(?<!\d)\.|\.(?!\d)")
+_PE_CLAUSE_STOP = re.compile(
+    r"[;\n]|\b(?:and|while|but|whereas)\b|(?<=\s)(?:e|ma)(?=\s)",
+    re.IGNORECASE)
+_PE_COMMA = re.compile(r",")
+_PE_QUALIFIER_AHEAD = re.compile(
+    r"\s+(?:" + "|".join(_PE_QUALIFIER_WORDS) + r")\b",
     re.IGNORECASE)
 
 # A qualifier is short: "Forward", "(FY2024)", "— storico". These caps are a
 # backstop for prose with no punctuation at all, not the primary boundary.
 _PE_PREFIX_CAP = 20
 _PE_SUFFIX_CAP = 24
+
+
+def _pe_comma_is_decimal(text: str, index: int) -> bool:
+    """Whether the comma at ``index`` is an Italian decimal mark (`18,2`)."""
+    before = text[index - 1] if index >= 1 else ""
+    after = text[index + 1] if index + 1 < len(text) else ""
+    return before.isdigit() and after.isdigit()
+
+
+def _pe_comma_introduces_qualifier(text: str, index: int) -> bool:
+    """Whether the comma at ``index`` is followed immediately by a qualifier.
+
+    The qualifier must *describe this figure*, not start another one. In
+    `Trailing P/E 18.2x, Forward P/E 25.4x` the word after the comma is
+    `Forward` — a qualifier word, but here the label of a second claim. Treating
+    it as this figure's qualifier would exclude a correct trailing value, which
+    is the same class of defect as treating the comma as a plain boundary.
+    """
+    ahead = _PE_QUALIFIER_AHEAD.match(text, index + 1)
+    if not ahead:
+        return False
+    rest = text[ahead.end():ahead.end() + 24]
+    # "Forward P/E 25.4x" is a new figure, not a qualifier on this one.
+    return not re.match(r"\s*(?:P/?E|PER|Price[-\s]to[-\s]Earnings)\b", rest, re.I)
+
+
+def _pe_suffix_end(text: str, end: int) -> int:
+    """Where the qualifier written after a figure stops.
+
+    Each separator is judged where it appears rather than substituted into one
+    pattern, because a comma's meaning depends on what follows it: ``", forward"``
+    continues this figure, ``", Forward P/E 25.4x"`` starts another. A single
+    character class cannot express that, and treating every comma as a boundary
+    made the first case a false MISMATCH.
+    """
+    pos = end
+    limit = min(len(text), end + _PE_SUFFIX_CAP)
+    while pos < limit:
+        period = _PE_PERIOD_STOP.search(text, pos, limit)
+        clause = _PE_CLAUSE_STOP.search(text, pos, limit)
+        comma = _PE_COMMA.search(text, pos, limit)
+
+        candidates = [c.start() for c in (period, clause, comma) if c]
+        if not candidates:
+            return limit
+        here = min(candidates)
+        if comma is not None and here == comma.start():
+            if _pe_comma_is_decimal(text, here):
+                pos = here + 1          # part of the number, not a boundary
+                continue
+            if _pe_comma_introduces_qualifier(text, here):
+                pos = here + 1          # the qualifier belongs to this figure
+                continue
+            return here
+        return here
+    return limit
+
+
+def _pe_prefix_start(text: str, start: int) -> int:
+    """Where the qualifier written before a figure starts."""
+    lowest = max(0, start - _PE_PREFIX_CAP)
+    prefix_start = lowest
+    for pattern in (_PE_PERIOD_STOP, _PE_CLAUSE_STOP):
+        for separator in pattern.finditer(text, lowest, start):
+            prefix_start = max(prefix_start, separator.end())
+    for comma in _PE_COMMA.finditer(text, lowest, start):
+        if _pe_comma_is_decimal(text, comma.start()):
+            continue
+        prefix_start = max(prefix_start, comma.end())
+    closing = text.rfind(")", prefix_start, start)
+    if closing != -1:
+        prefix_start = closing + 1
+    return prefix_start
 
 
 def _pe_qualifier_scope(text: str, start: int, end: int) -> str:
@@ -373,32 +456,19 @@ def _pe_qualifier_scope(text: str, start: int, end: int) -> str:
 
     - before the label: "Forward P/E of 18.2", "FY2024 P/E 12x";
     - between label and number: "P/E forward 18,2";
-    - after the number, bracketed or dashed: "P/E 18.2x (forward)",
-      "P/E 18,2x — storico".
-
-    The trailing side was missing from an earlier version, which read
-    `P/E 18.2x (forward)` as a trailing claim and produced a false MISMATCH.
+    - after the number, bracketed, dashed or comma-apposed:
+      "P/E 18.2x (forward)", "P/E 18,2x — storico", "P/E 18.2x, forward".
 
     The boundary is the clause separator, not a character radius. A radius
     cannot work: `(forward) and P/E 25.4x (trailing)` puts 13 characters between
     the two figures, so any radius reaching `(trailing)` also reaches
-    `(forward)`. Separators end a qualifier because that is where prose stops
-    qualifying this figure and starts qualifying the next one.
+    `(forward)`.
+
+    A comma needs the extra care `_pe_suffix_end` gives it: it separates clauses
+    and introduces qualifiers and is the Italian decimal mark, so it cannot be a
+    plain stop character.
     """
-    prefix_start = 0
-    for separator in _PE_QUALIFIER_STOP.finditer(text, 0, start):
-        prefix_start = separator.end()
-    # A closing bracket also ends the previous figure's qualifier.
-    closing = text.rfind(")", prefix_start, start)
-    if closing != -1:
-        prefix_start = closing + 1
-    prefix_start = max(prefix_start, start - _PE_PREFIX_CAP)
-
-    separator = _PE_QUALIFIER_STOP.search(text, end)
-    suffix_end = separator.start() if separator else len(text)
-    suffix_end = min(suffix_end, end + _PE_SUFFIX_CAP)
-
-    return text[prefix_start:suffix_end]
+    return text[_pe_prefix_start(text, start):_pe_suffix_end(text, end)]
 
 
 def _pe_claim_value(text: str, match: re.Match[str]) -> str | None:

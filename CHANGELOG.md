@@ -19,6 +19,31 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.27] — 2026-11-10
+
+### Fixed
+
+- **A comma no longer ends the clause when it introduces a qualifier.** `,` sat
+  in `_PE_QUALIFIER_STOP` as a plain character, so every comma was a boundary:
+  `P/E 18.2x, forward`, `P/E 18.2x, FY2024` and `P/E 18,2x, storico` were all
+  read as current trailing claims, and against `pe_trailing = 25.4` each
+  produced a **false MISMATCH** and blocked the order of a correct sentence.
+
+  A comma has three roles — clause separator, appositive introducer, Italian
+  decimal mark — and a character class cannot distinguish them. It is now judged
+  where it appears: a decimal when flanked by digits (`18,2`), a continuation
+  when followed by a qualifier word that does not itself label a new P/E
+  (`", forward"`), and a boundary otherwise (`", while forward outlook
+  improved"`, `", Forward P/E 25.4x"`).
+
+- **The Italian decimal comma is no longer a boundary.** `P/E 18,2x, storico`
+  previously split at the first comma, inside the number.
+
+### Changed
+
+- Corrected a comment that named `_pe_qualifier_scope` as the place the comma is
+  judged; it is judged in `_pe_suffix_end`.
+
 ## [0.8.26] — 2026-11-10
 
 ### Fixed
