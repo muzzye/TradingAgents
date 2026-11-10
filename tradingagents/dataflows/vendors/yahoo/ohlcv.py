@@ -1,5 +1,6 @@
 import logging
 import os
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import yfinance as yf
@@ -9,6 +10,9 @@ from tradingagents.dataflows.errors import NoMarketDataError
 from tradingagents.dataflows.files import replace_file
 from tradingagents.dataflows.symbols import normalize_symbol, safe_ticker_component
 from tradingagents.dataflows.vendors.yahoo.common import raise_for_empty, yf_retry
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only
+    from tradingagents.dataflows.vendors.bar_finality import BarProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +160,38 @@ def _cache_is_fresh(data_file, as_of_dt, now) -> bool:
     if written.date() != now.date():
         return False
     return as_of_dt.date() < now.date() or (now - written).total_seconds() <= OHLCV_CACHE_TTL_SECONDS
+
+
+def assess_last_bar(symbol: str, data: pd.DataFrame, *,
+                    observed_at: str | None = None,
+                    now: str | None = None) -> "BarProvenance":
+    """The finality of the frame's newest bar, judged against the session calendar.
+
+    ``load_ohlcv`` returns a frame whose last row may be a candle still forming:
+    Yahoo publishes today's partial bar during market hours, and its ``Close``
+    is a price, not a close (#1150). This is the judgement a caller needs before
+    an end-of-day decision, computed here because this is where the frame and
+    its dates are already in hand.
+
+    ``observed_at`` should be the moment the frame was read; it defaults to
+    ``now``, which is right for a live run and wrong for a replay — a backtest
+    passes the instant it is simulating.
+    """
+    from tradingagents.dataflows.vendors.bar_finality import assess_finality
+
+    if data is None or data.empty or "Date" not in data.columns:
+        return assess_finality(None, source="yfinance")
+
+    last = data["Date"].iloc[-1]
+    session_date = (last.date().isoformat() if hasattr(last, "date")
+                    else str(last)[:10])
+    return assess_finality(
+        observed_at or now,
+        session_date=session_date,
+        source="yfinance",
+        now=now,
+        snapshot_id=f"{symbol}-{session_date}",
+    )
 
 
 def load_ohlcv(symbol: str, as_of_date: str, fill_gaps: bool = True) -> pd.DataFrame:
