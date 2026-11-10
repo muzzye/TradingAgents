@@ -114,6 +114,42 @@ def redact(payload):
     return payload
 
 
+def tool_calls_from_messages(messages, *, limit: int = 500) -> list[dict]:
+    """Every tool call in a run's message history, in order, bounded.
+
+    §Task 5 of P6: a record must say what the run *read*, not only what it
+    concluded. Each entry keeps the tool name, its arguments (redacted) and
+    whether a result came back, so a figure in a report can be traced to the
+    call that produced it — the chain the lineage audit could not reconstruct.
+
+    ``messages`` is any iterable of LangChain-style messages. Nothing here
+    assumes a specific graph shape: a message with ``tool_calls`` contributes
+    one entry per call, and the walk stops at ``limit`` so a runaway loop cannot
+    fill the record.
+    """
+    entries: list[dict] = []
+    answered: set[str] = set()
+    for message in messages or ():
+        for call in (getattr(message, "tool_calls", None) or ()):
+            if len(entries) >= limit:
+                return entries
+            call_id = call.get("id") or call.get("tool_call_id")
+            entries.append({
+                "tool": call.get("name"),
+                "call_id": call_id,
+                "args": redact(call.get("args") or {}),
+                "answered": False,
+            })
+        # A ToolMessage answers the call it names.
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if tool_call_id:
+            answered.add(tool_call_id)
+    for entry in entries:
+        if entry.get("call_id") in answered:
+            entry["answered"] = True
+    return entries
+
+
 def _bounded(text, limit: int) -> dict:
     """A report as a bounded, self-describing value."""
     if text is None:
@@ -151,6 +187,11 @@ class RunRecord:
     metric_registry: dict = field(default_factory=dict)
     # What each agent said, bounded and marked when truncated.
     agents: dict = field(default_factory=dict)
+    # Every tool the run invoked, in order, with its arguments. §Task 5 of P6
+    # asks for a tool-call audit: without it a record shows what an agent
+    # concluded but not what it read to conclude it, and a figure sourced from
+    # a tool call cannot be traced to that call.
+    tool_calls: list = field(default_factory=list)
     # The decision, the risk assessment and the gate's verdict.
     decision: dict = field(default_factory=dict)
     risk: dict = field(default_factory=dict)
@@ -172,6 +213,7 @@ class RunRecord:
             "filings": self.filings,
             "metric_registry": self.metric_registry,
             "agents": self.agents,
+            "tool_calls": self.tool_calls,
             "decision": self.decision,
             "risk": self.risk,
             "execution_gate": self.execution_gate,

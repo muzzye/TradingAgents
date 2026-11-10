@@ -19,7 +19,7 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
-## [0.8.6] — 2026-11-10
+## [0.8.7] — 2026-11-10
 
 ### Fixed
 
@@ -42,6 +42,35 @@ Istruzioni per l'agente AI:
 - **`tests/test_deterministic_math.py` no longer leaks a registry between
   tests.** Three tests bound one without releasing it — the defect this release
   fixes, in test form — and now use the `certified_registry` context manager.
+
+## [0.8.6] — 2026-11-10
+
+### Added
+
+- **Every run record now carries a tool-call audit.** `RunRecord.tool_calls`
+  and `tool_call_from_messages()` record each tool the run invoked — name,
+  redacted arguments, call id and whether a result came back — populated from
+  the run's message history. Without it a record showed what an agent concluded
+  but not what it read, and a figure in a report could not be traced to the call
+  that produced it.
+- **The BRK-B snapshot carries the risk policy, the news and the EPS pair.**
+  `RISK_POLICY` (equity, cash, budget, exposure cap, slippage, commission, gap
+  stress, minimum stop), `NEWS_ARTICLES` (two articles with publication and
+  update times, comparison type and price window), `EPS_TTM` with
+  `WEIGHTED_AVERAGE_SHARES`, the settled `EOD_CLOSE`/`EOD_PREVIOUS_CLOSE`
+  (distinct from the intraday price) and fixed `LLM_ANSWERS`. A test that
+  supplied its own policy would run a different one from the audit's.
+- **`tests/test_p6_e2e_certification.py`** — 32 end-to-end certification tests
+  over the frozen fixture: revenue, both P/B forms, EPS, bar finality, news
+  reconciliation, sizing, gate verdict, five-run reproducibility, and ten
+  negative cases that must not authorise an order.
+
+### Changed
+
+- **The `e2e-reliability` CI job runs the phase-4–6 suites.** It now includes
+  `test_p6_e2e_certification.py`, `test_p5_risk_order_gate.py` and
+  `test_p4_certified_metrics.py`, so a P0 failure in them fails that required
+  check by name rather than only the matrix job.
 
 ## [0.8.5] — 2026-11-10
 
