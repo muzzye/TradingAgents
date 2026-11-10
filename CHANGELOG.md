@@ -19,6 +19,32 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-11-10
+
+### Fixed
+
+- **A partial candle is no longer a close, and the frame says so.** A new
+  `assess_last_bar()` on the OHLCV loader judges the newest bar against the
+  exchange session, so a caller asks the data what it is instead of inferring it
+  from a `Close` column. `BarProvenance` now carries a `snapshot_id`, so two
+  bars read in one run are provably the same observation. (F5)
+- **A news figure can no longer stand in for the certified change.** New
+  `dataflows/math/event_claims.py` classifies an article's move against a
+  benchmark built from confirmed bars: `CONFIRMED`, `HISTORICAL_CONTEXT`,
+  `TIME_WINDOW_MISMATCH`, `CONTRADICTED` or `UNVERIFIED`. An intraday -1.01%
+  against a close-to-close +0.76% is a `TIME_WINDOW_MISMATCH` — kept and
+  quotable as what it is, never a replacement for the end-of-day change. Every
+  claim keeps its URL, provider, publication and update times, price window,
+  comparison type, benchmark and verdict.
+- **A growth label is checked against its periods.** New
+  `dataflows/math/period_labels.py`: `YoY` requires twelve months, `MoM` one
+  month, quarterly `YoY` the same quarter a year earlier, `QoQ` the previous
+  quarter, and an `annualized` figure must state its formula. A comparison
+  between September 2026 and November 2025 labelled `YoY` is
+  `PERIOD_MISMATCH` — the periods are ten months apart — and
+  `growth_for_label()` returns no figure for it, because the number is what a
+  reader would quote without reading the label.
+
 ## [0.8.2] — 2026-11-10
 
 ### Fixed

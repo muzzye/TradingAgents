@@ -79,6 +79,10 @@ class BarProvenance:
     last_confirmed_close: str | None
     source: str
     session_calendar: str = "NYSE"
+    # A stable identifier for the observation this bar belongs to, so two bars
+    # read in one run are provably the same snapshot and a report can be traced
+    # back to the price that produced it.
+    snapshot_id: str | None = None
     reason: str = ""
 
     @property
@@ -111,6 +115,7 @@ class BarProvenance:
             "last_confirmed_close": self.last_confirmed_close,
             "source": self.source,
             "session_calendar": self.session_calendar,
+            "snapshot_id": self.snapshot_id,
             "usable_for_eod": self.usable_for_eod,
             "usable_for_intraday": self.usable_for_intraday,
             "is_provisional": self.is_provisional,
@@ -157,6 +162,7 @@ def assess_finality(
     settlement_grace: timedelta = DEFAULT_SETTLEMENT_GRACE,
     now: str | datetime | None = None,
     last_expected_session: str | None = None,
+    snapshot_id: str | None = None,
 ) -> BarProvenance:
     """Judge a bar against the exchange session that produced it.
 
@@ -178,7 +184,7 @@ def assess_finality(
             source_timestamp=(str(source_timestamp)
                               if source_timestamp is not None else None),
             finality=BarFinality.UNKNOWN, last_confirmed_close=None,
-            source=source,
+            source=source, snapshot_id=snapshot_id,
             reason="no observation timestamp: a price without a time is not a close",
         )
 
@@ -192,6 +198,7 @@ def assess_finality(
                               if source_timestamp is not None else None),
             finality=BarFinality.STALE,
             last_confirmed_close=last_expected_session, source=source,
+            snapshot_id=snapshot_id,
             reason=(f"the bar is for {day} but the series should reach "
                     f"{last_expected_session}"),
         )
@@ -204,7 +211,7 @@ def assess_finality(
             source_timestamp=(str(source_timestamp)
                               if source_timestamp is not None else None),
             finality=BarFinality.UNKNOWN, last_confirmed_close=None,
-            source=source,
+            source=source, snapshot_id=snapshot_id,
             reason=(f"{day} is not a trading day ({day_kind}), so a bar dated "
                     "that day cannot be a close"),
         )
@@ -220,7 +227,7 @@ def assess_finality(
                               if source_timestamp is not None else None),
             finality=BarFinality.INTRADAY_PARTIAL,
             last_confirmed_close=_previous_close(day, exchange_tz),
-            source=source,
+            source=source, snapshot_id=snapshot_id,
             reason=(f"the session closes at {close_at:%H:%M} and the "
                     f"observation is at {judged_local:%H:%M}: the bar is a "
                     "partial candle, not a close"),
@@ -234,7 +241,7 @@ def assess_finality(
                               if source_timestamp is not None else None),
             finality=BarFinality.EOD_PENDING_CONFIRMATION,
             last_confirmed_close=_previous_close(day, exchange_tz),
-            source=source,
+            source=source, snapshot_id=snapshot_id,
             reason=("the session has closed but the vendor may still restate "
                     "the print"),
         )
@@ -245,7 +252,7 @@ def assess_finality(
         source_timestamp=(str(source_timestamp)
                           if source_timestamp is not None else None),
         finality=BarFinality.EOD_CONFIRMED,
-        last_confirmed_close=day, source=source,
+        last_confirmed_close=day, source=source, snapshot_id=snapshot_id,
         reason="",
     )
 
