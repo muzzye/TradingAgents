@@ -19,6 +19,30 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.5] — 2026-11-10
+
+### Added
+
+- **`authorized_size()`: one quantity from four limits.** The risk budget and
+  the per-symbol exposure cap were the only limits an order was sized against.
+  A cash limit and a position limit were missing, so a plan could be authorised
+  that the account could not pay for, and a `REDUCE_LONG` could exceed the units
+  actually held. The function reports all four — `risk_limited_qty`,
+  `exposure_limited_qty`, `cash_limited_qty`, `position_limited_qty` — takes the
+  minimum, and names which one bound the size. Commissions reduce the cash
+  available before the cash limit is computed; slippage and gap widen the stop
+  distance before the risk limit is (F4).
+- **An unknown cash balance now blocks.** "Available cash" is a required input
+  for an authorisation: absent cash is not unlimited cash, and it returns
+  `AVAILABLE_CASH_MISSING` with quantity zero.
+
+### Changed
+
+- **Order sizing delegates to the existing engine.** `authorized_size` calls
+  `risk_engine.size_with_exposure_cap` and reports its answer as `engine_qty`
+  rather than re-deriving the stop/exposure arithmetic. A second copy would be a
+  second authorisation path, and the Execution Gate already calls the first.
+
 ## [0.8.4] — 2026-11-10
 
 ### Added
