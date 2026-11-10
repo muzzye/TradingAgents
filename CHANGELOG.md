@@ -19,6 +19,24 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.8.14] — 2026-11-10
+
+### Fixed
+
+- **A standalone sentence is a claim on the current period, whatever the line
+  above said.** `_claim_context` inherited the previous line's period whenever
+  the current line named none, so a correct `Ricavi consolidati Q3 2025: 94.972
+  milioni` silenced the contradicted `Ricavi consolidati: 74.322 milioni` on the
+  next line and the run passed — a false negative in the check that exists to
+  catch exactly that. Inheritance now requires a verifiable structural
+  association: both lines must be rows of the same Markdown table. Prose has no
+  such association, so a sentence with no period of its own is compared against
+  the certified period.
+- **An annual figure is not compared with a quarterly metric.** `FY2026`
+  measures twelve months and the certified revenue is one quarter, so comparing
+  the two numbers reported a contradiction that did not exist. Only an
+  explicitly named quarter is compared with a quarterly metric.
+
 ## [0.8.13] — 2026-11-10
 
 ### Fixed

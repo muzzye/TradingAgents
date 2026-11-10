@@ -302,11 +302,18 @@ def _claim_context(text: str, start: int, end: int) -> str:
     - **It was measured in characters, not lines.** In a table the same window
       reached back several rows.
 
-    The context is therefore the claim's own line, and — only when that line
-    carries no period of its own — the line directly above, which is how a
-    table with a period column to the left is read::
+    The context is therefore the claim's own line. It is extended to the line
+    above **only** when both lines are rows of the same Markdown table, which
+    is the one structural association that can be verified::
 
         | Q3 2026 | 74.322 |
+
+    A standalone sentence with no period of its own is a claim on the *current*
+    period, and inheriting the previous line's period would hide exactly the
+    contradiction the check exists to find::
+
+        Ricavi consolidati Q3 2025: 94.972 milioni USD
+        Ricavi consolidati: 74.322 milioni USD      <- must be compared to today
 
     ``value_at`` inside the returned string tells the caller where the figure
     sits, so the nearest period wins when the line names more than one.
@@ -319,12 +326,28 @@ def _claim_context(text: str, start: int, end: int) -> str:
     if _NAMED_PERIOD.search(own):
         return own
 
-    # No period on this line: a table puts it in a preceding cell or row.
+    # A period on another line may qualify this figure only when both are rows
+    # of one table: prose has no such association.
+    if not _is_table_row(own):
+        return own
+
     previous_start = text.rfind("\n", 0, max(0, line_start - 1)) + 1
     previous = text[previous_start:line_start].strip() if line_start > 0 else ""
-    if previous and _NAMED_PERIOD.search(previous):
+    if previous and _is_table_row(previous) and _NAMED_PERIOD.search(previous):
         return previous + " " + own
     return own
+
+
+def _is_table_row(line: str) -> bool:
+    """Whether ``line`` is a Markdown table row.
+
+    A row starts with a pipe (optionally after indentation) and carries at
+    least one more — the shape every table in the reports has. This is the
+    structural signal that a period on a neighbouring line belongs to the same
+    record rather than to a different sentence.
+    """
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.count("|") >= 2
 
 
 def _table_column_scale(text: str, column: int) -> str:
@@ -418,6 +441,12 @@ def _period_is_comparable(context: str, record, value_at: int | None = None) -> 
         # period the report named, so nothing is hidden.
         return True
     if claimed_year is not None and claimed_year != certified_year:
+        return False
+    # An annual figure and a quarterly one measure different spans: `FY2026`
+    # against a certified Q3 2026 is not the same metric, and comparing the two
+    # numbers would report a contradiction that does not exist. Only an
+    # explicitly-named quarter is compared with a quarterly metric.
+    if claimed_quarter is None and certified_quarter is not None:
         return False
     return not (claimed_quarter is not None and certified_quarter is not None
                 and claimed_quarter != certified_quarter)

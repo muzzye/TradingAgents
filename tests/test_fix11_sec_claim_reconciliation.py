@@ -583,3 +583,113 @@ class TestPeriodAttribution:
             metric_registry=registry, trigger_met=True)
         assert record.to_dict().get("revenue_claim_findings") in (None, [])
         assert "SEC_REVENUE_CLAIM_MISMATCH" not in [r.value for r in decision.reasons]
+
+
+# ===========================================================================
+# Period context isolation — a standalone sentence is about today
+# ===========================================================================
+class TestPeriodContextIsolation:
+    """A sentence with no period of its own is a claim on the current period.
+
+    `_claim_context` used to inherit the previous line's period whenever the
+    current line named none. In prose that association does not exist, so a
+    correct `Q3 2025: 94.972` hid the contradicted `74.322` on the next line and
+    the run passed silently.
+    """
+
+    def test_a_historical_row_does_not_silence_the_current_claim(self):
+        """The regression case: one finding, for the current figure."""
+        report = ("Ricavi consolidati Q3 2025: 94.972 milioni USD\n"
+                  "Ricavi consolidati: 74.322 milioni USD")
+        findings = _reconcile(report)
+        assert len(findings) == 1, "the current claim was silenced by the row above"
+        assert findings[0].code == "SEC_REVENUE_CLAIM_MISMATCH"
+        assert findings[0].claimed_value == COMPONENT
+
+    def test_a_historical_row_and_a_correct_current_claim_is_silent(self):
+        report = ("Ricavi consolidati Q3 2025: 94.972 milioni USD\n"
+                  "Ricavi consolidati: 105.647 milioni USD")
+        assert _reconcile(report) == []
+
+    def test_two_rows_each_naming_a_period_behave_as_before(self):
+        report = ("Ricavi consolidati Q3 2025: 94.972 milioni USD\n"
+                  "Ricavi consolidati Q3 2026: 74.322 milioni USD")
+        findings = _reconcile(report)
+        assert len(findings) == 1
+        assert findings[0].claimed_value == COMPONENT
+
+    def test_a_two_period_table_behaves_as_before(self):
+        report = ("| Voce | Q3 2025 | Q3 2026 |\n"
+                  "|---|---|---|\n"
+                  "| Ricavi consolidati | 94.972 | 74.322 |\n\n"
+                  "USD in millions")
+        findings = _reconcile(report)
+        assert len(findings) == 1
+        assert findings[0].claimed_value == COMPONENT
+
+    def test_a_table_row_still_keeps_its_column_period(self):
+        """The structural association is what legitimately binds a period.
+
+        The supported shape is a period *column* (`| Q3 2026 | 74.322 |`), which
+        is where a Markdown table states its periods. A period that lives on the
+        row above is not inherited in prose — only between table rows, which is
+        the association this test pins.
+        """
+        report = ("| Voce | Q3 2025 | Q3 2026 |\n"
+                  "|---|---|---|\n"
+                  "| Ricavi consolidati | 94.972 | 74.322 |\n\n"
+                  "USD in millions")
+        findings = _reconcile(report)
+        assert len(findings) == 1, "a table cell must keep its column's period"
+        assert findings[0].claimed_value == COMPONENT
+
+    def test_an_annual_figure_is_not_compared_with_a_quarterly_metric(self):
+        """FY2026 measures twelve months; the certified metric is one quarter."""
+        assert _reconcile("Ricavi consolidati FY2026: 74.322 milioni") == []
+
+    def test_the_quarterly_figure_is_still_compared(self):
+        assert len(_reconcile("Ricavi consolidati Q3 2026: 74.322 milioni")) == 1
+
+    def test_an_implicit_period_is_still_a_claim_on_today(self):
+        assert len(_reconcile("Ricavi consolidati: 74.322 milioni")) == 1
+
+    def test_the_current_mismatch_is_persisted_and_blocks(self, tmp_path):
+        from tradingagents.dataflows import run_record as rr
+        from tradingagents.dataflows.gate_integration import evaluate_decision
+
+        report = ("Ricavi consolidati Q3 2025: 94.972 milioni USD\n"
+                  "Ricavi consolidati: 74.322 milioni USD")
+        state = _rated_state(report)
+        registry = _certified_registry()
+        record, decision = evaluate_decision(
+            "BRK-B", F.ANALYSIS_DATE, state, snapshot_id="ctx",
+            metric_registry=registry, trigger_met=True)
+
+        audit = record.to_dict()
+        findings = audit.get("revenue_claim_findings")
+        assert findings, "the current mismatch must reach the audit"
+        assert findings[0]["claimed_value"] == COMPONENT
+        assert findings[0]["blocks"] is True
+        assert "SEC_REVENUE_CLAIM_MISMATCH" in [r.value for r in decision.reasons]
+        assert decision.creates_order is False
+
+        run = rr.RunRecord(
+            run_id=rr.new_run_id("BRK-B"), ticker="BRK-B",
+            analysis_date=F.ANALYSIS_DATE,
+            revenue_claim_findings=findings,
+            execution_gate=audit.get("execution", {}), audit=audit)
+        payload = json.loads(rr.write_run(tmp_path, run).read_text(encoding="utf-8"))
+        assert payload["revenue_claim_findings"][0]["claimed_value"] == COMPONENT
+
+    def test_the_corrected_run_does_not_block(self):
+        from tradingagents.dataflows.gate_integration import evaluate_decision
+
+        state = _rated_state(
+            "Ricavi consolidati Q3 2025: 94.972 milioni USD\n"
+            "Ricavi consolidati: 105.647 milioni USD")
+        registry = _certified_registry()
+        record, decision = evaluate_decision(
+            "BRK-B", F.ANALYSIS_DATE, state, snapshot_id="ok",
+            metric_registry=registry, trigger_met=True)
+        assert record.to_dict().get("revenue_claim_findings") in (None, [])
+        assert "SEC_REVENUE_CLAIM_MISMATCH" not in [r.value for r in decision.reasons]
