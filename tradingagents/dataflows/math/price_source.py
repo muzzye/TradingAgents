@@ -48,16 +48,24 @@ def _eod_stamp_settles(timestamp, session_date) -> bool:
 
     ``session_date``, when given, must match the stamp's New York day: a bar
     cannot close a session it is not part of.
+
+    When the stamp is absent the session date still decides. A daily bar is
+    settled *for its session*, which is a claim about the date, not about the
+    instant — so an EOD bar dated Thanksgiving, a Saturday or a year the
+    calendar does not describe names a session that never happened. Only a
+    trading day that the calendar knows supports the certification without an
+    instant; with no session date either, nothing identifies the session and
+    the claim cannot be verified.
     """
     from tradingagents.dataflows.math.exchange_calendar import session_day
 
-    # No timestamp is not a contradiction: a daily bar is settled by
-    # definition for its session, and `bar_finality` already asserts it. Only a
-    # stamp that *disagrees* with the calendar can refute the claim. Refusing
-    # the absent case would have broken every caller that supplies a session
-    # date and no intraday instant — a normal shape for an EOD bar.
     if not timestamp:
-        return True
+        if not session_date:
+            return False
+        # Validate the date itself: it must be a session the calendar knows.
+        declared = session_day(str(session_date)[:10])
+        return bool(declared.trades)
+
     instant = _parse_instant(timestamp)
     if instant is None:
         return False

@@ -428,3 +428,74 @@ class TestTheCompiledGraphPath:
         assert execution["entry_trigger"]["observed_status"] == "VERIFIED"
         assert execution["risk_sizing_price"] == 550.00
         assert execution["trigger_level"] == 540.00
+
+
+class TestAnEodWithoutATimestampStillNeedsASession:
+    """An absent stamp is not a licence to skip the calendar.
+
+    The previous rule returned VERIFIED as soon as `timestamp` was missing,
+    arguing that a daily bar is settled by definition. That is true of the
+    *bar*, not of the *date*: an EOD bar dated Thanksgiving, a Saturday or a
+    year the calendar does not cover describes a session that never happened.
+    The session date must be validated whether or not an instant is supplied.
+    """
+
+    def _status(self, **kwargs):
+        return qualified_price(TICKER, 550.00,
+                               bar_finality="EOD_CONFIRMED", **kwargs)[
+            "validation_status"]
+
+    def test_a_valid_trading_day_without_a_stamp_is_verified(self):
+        """The normal daily shape must keep working."""
+        assert self._status(session_date="2026-11-10") == "VERIFIED"
+
+    def test_thanksgiving_without_a_stamp_is_refused(self):
+        assert self._status(session_date="2026-11-26") != "VERIFIED"
+
+    def test_a_saturday_without_a_stamp_is_refused(self):
+        assert self._status(session_date="2026-11-28") != "VERIFIED"
+
+    def test_a_sunday_without_a_stamp_is_refused(self):
+        assert self._status(session_date="2026-11-29") != "VERIFIED"
+
+    def test_an_uncovered_year_without_a_stamp_is_not_certified(self):
+        """The calendar cannot vouch for a year it does not describe."""
+        assert self._status(session_date="2030-06-10") != "VERIFIED"
+
+    def test_no_stamp_and_no_session_date_is_not_verified(self):
+        """Nothing identifies the session, so nothing can certify the close."""
+        assert self._status() != "VERIFIED"
+
+    def test_a_valid_stamp_at_the_close_is_verified(self):
+        assert self._status(
+            session_date=TRADE_DATE,
+            observation_timestamp=_stamp(16, 0)) == "VERIFIED"
+
+    def test_an_early_close_stamp_at_thirteen_is_verified(self):
+        assert self._status(
+            session_date="2026-11-27",
+            observation_timestamp=_stamp(13, 0, day="2026-11-27")) == "VERIFIED"
+
+    def test_a_thirteen_hundred_stamp_on_a_regular_day_is_refused(self):
+        assert self._status(
+            session_date=TRADE_DATE,
+            observation_timestamp=_stamp(13, 0)) != "VERIFIED"
+
+    def test_an_uncertified_eod_cannot_price_a_verified_metric(self):
+        """The consequence: an unverifiable close reaches no certified metric."""
+        from tradingagents.dataflows.math.run_registry import (
+            RunInputs,
+            build_run_registry,
+        )
+
+        provenance = qualified_price(
+            TICKER, 575.25, bar_finality="EOD_CONFIRMED",
+            session_date="2026-11-26")          # Thanksgiving
+        registry = build_run_registry(
+            RunInputs(price=575.25, price_provenance=provenance,
+                      eps_ttm=39.76, weighted_average_shares=1_437_000_000.0),
+            run_id="fix5-holiday")
+        multiple = registry.get("pe_trailing")
+        assert multiple.is_usable is False, (
+            "a close dated a holiday priced a VERIFIED multiple")
+        assert multiple.calculation_status.value == "REFUSED"

@@ -19,6 +19,41 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-11-11
+
+### Fixed
+
+- **An EOD close with no timestamp skipped the calendar entirely.** The previous
+  rule returned `VERIFIED` as soon as `timestamp` was missing, on the argument
+  that a daily bar is settled by definition. That holds for the *bar*, not for
+  the *date*: a close dated Thanksgiving, a Saturday or a year the calendar does
+  not describe names a session that never happened. Measured before:
+
+  | `session_date` | Before | After |
+  |---|---|---|
+  | 2026-11-10 (trading day) | VERIFIED | VERIFIED |
+  | 2026-11-26 (Thanksgiving) | **VERIFIED** | `UNVERIFIED` |
+  | 2026-11-28 (Saturday) | **VERIFIED** | `UNVERIFIED` |
+  | 2030-06-10 (uncovered year) | **VERIFIED** | `UNVERIFIED` |
+  | *(absent)* | **VERIFIED** | `UNVERIFIED` |
+
+  The session date is now validated through the exchange calendar whether or not
+  an instant is supplied. A valid trading day still certifies a normal daily
+  bar without one; with no session date either, nothing identifies the session
+  and the claim cannot be verified. The existing checks for a present timestamp
+  — timezone awareness, matching day, regular or early close — are unchanged.
+
+  The consequence is asserted, not assumed: a close dated a holiday no longer
+  reaches a `VERIFIED` metric.
+
+### Changed
+
+- Fixtures in `test_fix2`, `test_fix3` and `test_fix5` called
+  `qualified_price(..., bar_finality="EOD_CONFIRMED")` with neither a session
+  date nor a timestamp. That shape is now `UNVERIFIED` by design, so those
+  fixtures declare the session they belong to. The rule was not relaxed for
+  them.
+
 ## [0.9.3] — 2026-11-11
 
 ### Fixed

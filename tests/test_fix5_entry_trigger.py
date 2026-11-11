@@ -496,7 +496,7 @@ class TestNoRegression:
         registry = build_run_registry(
             RunInputs(price=50.8,
                       price_provenance=qualified_price(
-                          TICKER, 50.8, bar_finality="EOD_CONFIRMED"),
+                          TICKER, 50.8, bar_finality="EOD_CONFIRMED", session_date="2026-11-09"),
                       eps_ttm=2.0, weighted_average_shares=1e9),
             run_id="fix5-pe")
         validation = validate_analyst_report(

@@ -565,7 +565,7 @@ class TestProvenanceRefusals:
             price=EOD_CLOSE, book_value_per_share=BVPS,
             claimed_inputs=("book_value_per_share",),
             price_provenance=qualified_price(
-                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED"),
+                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED", session_date="2026-11-09"),
             equity_provenance=verified_accounting()
         )
         registry = build_run_registry(inputs, run_id="bvps-claim")
@@ -728,7 +728,7 @@ class TestLLMPrecedence:
                  "verified_market_snapshot": {
                      "close": EOD_CLOSE,
                      "price_provenance": qualified_price(
-                         "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED")}}
+                         "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED", session_date="2026-11-09")}}
         if sec_equity:
             facts = extract_sec_accounting(_filing(), as_of_date="2026-11-10")
             state.update({
@@ -791,7 +791,7 @@ class TestProductionWiring:
                             lambda provider, ticker, date: (payload, "0001067983"))
         monkeypatch.setattr(module, "_qualified_price_from_provider",
                             lambda provider, ticker, date: qualified_price(
-                                ticker, EOD_CLOSE, bar_finality="EOD_CONFIRMED"))
+                                ticker, EOD_CLOSE, bar_finality="EOD_CONFIRMED", session_date="2026-11-09"))
 
         node = module.create_data_quality_check()  # no providers, as in setup.py
         update = node({"company_of_interest": "BRK-B",
@@ -945,7 +945,7 @@ class TestAccountingVerdictReachesRegistry:
             "verified_market_snapshot": {
                 "close": EOD_CLOSE,
                 "price_provenance": qualified_price(
-                    "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED")},
+                    "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED", session_date="2026-11-09")},
             "equity": bundle.equity,
             "equity_period_end": bundle.equity_period_end,
             "shares_class_a": bundle.shares_class_a,
@@ -1018,7 +1018,7 @@ class TestAccountingProvenanceRequired:
         return RunInputs(
             price=EOD_CLOSE, book_value_per_share=bvps,
             price_provenance=qualified_price(
-                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED"),
+                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED", session_date="2026-11-09"),
             equity_provenance=provenance,
         )
 
@@ -1033,7 +1033,7 @@ class TestAccountingProvenanceRequired:
             shares_class_a=550_000.0, shares_class_b=1_400_000_000.0,
             class_a_to_b_ratio=1500.0,
             price_provenance=qualified_price(
-                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED"),
+                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED", session_date="2026-11-09"),
             equity_provenance=None,
         )
         registry = build_run_registry(inputs, run_id="p-inputs")
@@ -1067,7 +1067,7 @@ class TestAccountingProvenanceRequired:
             shares_class_a=550_000.0, shares_class_b=1_400_000_000.0,
             class_a_to_b_ratio=1500.0,
             price_provenance=qualified_price(
-                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED"),
+                "BRK-B", EOD_CLOSE, bar_finality="EOD_CONFIRMED", session_date="2026-11-09"),
             equity_provenance={"validation_status": "VERIFIED",
                                "concept": "StockholdersEquity"},
         )
