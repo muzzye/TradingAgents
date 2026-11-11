@@ -520,6 +520,67 @@ class TradingAgentsGraph:
             rating=run_rating(final_state),
         )
 
+    def _evaluate_entry_trigger(self, final_state: dict, trade_date: str):
+        """FIX #5: the deterministic entry verdict for this run (§7).
+
+        Reads the plan's own labelled numbers and the run's verified snapshot.
+        Never parses the model's prose for a price and never asserts a
+        direction the plan did not state: an ambiguous plan yields AMBIGUOUS,
+        which the gate turns into WAIT rather than an order.
+
+        Best-effort like the rest of the reliability layer — a failure here
+        leaves the verdict None, the gate falls back to its `trigger_met`
+        default (False), and the run produces WAIT instead of crashing.
+        """
+        try:
+            from tradingagents.dataflows.math.entry_trigger import (
+                evaluate_entry_trigger,
+            )
+            from tradingagents.dataflows.plan_extraction import (
+                extract_plan_numbers,
+            )
+
+            plan = extract_plan_numbers(
+                final_state.get("trader_investment_plan"))
+            return evaluate_entry_trigger(
+                entry=plan.entry,
+                mode=plan.entry_mode,
+                direction=plan.direction,
+                snapshot=final_state.get("verified_market_snapshot"),
+                trade_date=trade_date,
+            )
+        except Exception:  # noqa: BLE001 — the audit must never sink the run
+            logger.exception(
+                "Entry-trigger evaluation failed for %s on %s",
+                final_state.get("company_of_interest"), trade_date)
+            return None
+
+    def _market_open_at(self, final_state: dict, trade_date: str) -> bool:
+        """FIX #5: the session state, derived rather than assumed (contract §4).
+
+        `market_open=True` was a default, so every run behaved as if the market
+        were open. Here the status comes from the snapshot's own timestamp; a
+        missing or unreadable stamp yields False, and a closed market turns the
+        decision into WAIT with MARKET_CLOSED rather than a proposal.
+        """
+        try:
+            from tradingagents.dataflows.math.session import (
+                SessionStatus,
+                market_session_status,
+            )
+
+            snapshot = final_state.get("verified_market_snapshot") or {}
+            stamp = snapshot.get("price_as_of")
+            if not stamp:
+                provenance = snapshot.get("price_provenance") or {}
+                stamp = provenance.get("timestamp")
+            if not stamp:
+                return False
+            return market_session_status(stamp) is SessionStatus.OPEN
+        except Exception:  # noqa: BLE001 — never assume open on a failure
+            logger.exception("Market-session check failed for %s", trade_date)
+            return False
+
     def _evaluate_reliability(self, company_name, trade_date, final_state,
                               portfolio=None, run_registry=None):
         """Run the decision through the Execution Gate and write the audit.
@@ -556,6 +617,14 @@ class TradingAgentsGraph:
         # with another run of the same instrument on the same day.
         from tradingagents.dataflows import run_record as rr
         run_id = rr.new_run_id(company_name)
+
+        # FIX #5: the entry trigger is evaluated here, deterministically, from
+        # the plan's own numbers and the run's verified snapshot. The gate has
+        # always accepted `trigger_met`; nothing supplied one, so the default
+        # False meant this path could only ever emit WAIT and
+        # PROPOSE_PAPER_ORDER was unreachable.
+        trigger = self._evaluate_entry_trigger(final_state, trade_date)
+        market_open = self._market_open_at(final_state, trade_date)
         try:
             record, decision = evaluate_decision(
                 company_name, trade_date, final_state,
@@ -567,6 +636,9 @@ class TradingAgentsGraph:
                 fundamentals_filings=filings,
                 used_fundamentals_period_end=used_end,
                 metric_registry=registry,
+                entry_trigger=trigger,
+                market_open=market_open,
+                price_snapshot=final_state.get("verified_market_snapshot"),
                 **_portfolio_sizing_inputs(self.config, portfolio, company_name),
             )
             attach_to_state(final_state, decision)

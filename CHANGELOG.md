@@ -19,6 +19,61 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-11
+
+### Added
+
+- **The entry trigger is evaluated in production.** `evaluate_decision()` has
+  always taken `trigger_met` as a caller's boolean, and the graph never supplied
+  one — so the default `False` meant every production run ended `WAIT` with
+  `ENTRY_TRIGGER_NOT_MET` and `PROPOSE_PAPER_ORDER` was unreachable, whatever
+  the data said. A new deterministic evaluator
+  (`dataflows/math/entry_trigger.py`) answers the plan's own entry condition
+  against the run's verified snapshot, and `_evaluate_reliability` passes its
+  verdict to the gate.
+
+  The semantics are explicit rather than inferred. `BREAKOUT` requires price
+  `>=` entry for a LONG (`<=` for a SHORT breakdown); `PULLBACK` is the mirror.
+  A plan that states an entry level and no mode is `AMBIGUOUS`, which yields no
+  proposal: `Entry 540.00` says nothing about whether the plan buys a break
+  above 540 or a dip below it, and guessing the direction would manufacture a
+  signal. This required a typed `entry_mode` field on `PlanNumbers`, defaulting
+  to `None` — deliberately not `BREAKOUT`.
+
+  The evaluator applies the same numerator rule as a valuation multiple: an
+  indicator is not a price, an unverified quote cannot open a position, and a
+  snapshot whose stamp is not the analysis date is history rather than a
+  current quote. `price_from_snapshot` supplies the provenance; `MARKET_PRICE_KINDS`
+  and `VERIFIED` decide admissibility — no second price rule was introduced.
+
+- **The market-session state is derived, not assumed.** `market_open=True` was
+  a default, so every run behaved as if the session were open. It is now read
+  from the snapshot's timestamp via `market_session_status`; a missing or
+  unreadable stamp yields `False`, and a closed market produces `WAIT` with
+  `MARKET_CLOSED`.
+
+- **The verdict is recorded in the audit.** `execution.entry_trigger` carries
+  `met`, `outcome`, `mode`, the entry level compared, the observed price, its
+  `kind` and `validation_status`, its timestamp, and the reason. It is distinct
+  from the existing `entry_triggers_satisfied`, which reports only whether the
+  gate proposed an order.
+
+### Fixed
+
+- The mode phrase's own level is now extracted. `Buy stop above 540.00` states
+  both the mode and the number, but only the `Entry` label was parsed, so the
+  mode was recognised while its level stayed `None`. An explicit `Entry` label
+  still wins when both are present.
+
+### Unchanged
+
+- The 50 existing gate tests that pass `trigger_met=True` explicitly keep
+  working: `entry_trigger` is optional and a caller-supplied boolean is still
+  honoured when no verdict is passed.
+- FIX #1–#4: no change to SEC revenue, P/B certification, price integrity or
+  P/E claim validation. Verified by the regression tests in
+  `tests/test_fix5_entry_trigger.py`.
+
 ## [0.8.27] — 2026-11-10
 
 ### Fixed

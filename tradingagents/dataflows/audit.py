@@ -83,6 +83,10 @@ class AuditRecord:
     # filing. Kept as full findings, not only as a reason code, so a reader can
     # see both figures and the accession they came from.
     revenue_claim_findings: list | None = None
+    # FIX #5: the deterministic entry-trigger verdict — what was compared, at
+    # which price, with whose provenance and stamp. Recorded as data so a
+    # reader can see *why* a plan was allowed to propose, not only that it was.
+    entry_trigger: object | None = None
 
     # Market snapshot as validated (None fields stay None: never invented).
     session_date: str | None = None
@@ -249,6 +253,12 @@ class AuditRecord:
             ),
             "reason_codes": reasons,
         }
+        # FIX #5: the trigger's own verdict, distinct from "the gate proposed".
+        # The previous field answers "was an order proposed", which is the gate's
+        # whole conclusion; a reader debugging a WAIT needs the trigger alone.
+        trigger = self.entry_trigger
+        if trigger is not None and hasattr(trigger, "summary"):
+            entry["entry_trigger"] = trigger.summary()
         # P0-D: the structured verdict, alongside the gate's raw action.
         verdict = self.execution_verdict
         if verdict is not None:

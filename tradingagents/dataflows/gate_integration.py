@@ -149,6 +149,12 @@ def evaluate_decision(
     stop: float | None = None,
     atr: float | None = None,
     trigger_met: bool = False,
+    # FIX #5: the deterministic verdict from `entry_trigger.evaluate_entry_trigger`.
+    # When supplied it decides `trigger_met` and is recorded in the audit, so
+    # the decision does not rest on a bare boolean a caller asserted. A caller
+    # that already knows the answer may still pass `trigger_met` alone; the
+    # production path passes the verdict.
+    entry_trigger=None,
     market_open: bool = True,
     # P0 data-quality inputs (all optional; absent checks are not guessed).
     fundamentals_filings: list | None = None,
@@ -442,6 +448,11 @@ def evaluate_decision(
         math_reasons = tuple(dict.fromkeys(
             tuple(math_reasons) + (GateReason.NO_CERTIFIED_METRIC,)))
 
+    # FIX #5: when a deterministic verdict is supplied it is the truth; the
+    # boolean is only for callers that computed the answer themselves.
+    if entry_trigger is not None:
+        trigger_met = bool(getattr(entry_trigger, "met", False))
+
     plan = PlanInput(
         ticker=ticker,
         rating=strategic.rating if strategic else "UNKNOWN",
@@ -504,6 +515,9 @@ def evaluate_decision(
         )
     if arithmetic_verdicts:
         record.arithmetic_verdicts = arithmetic_verdicts
+    if entry_trigger is not None:
+        # FIX #5: the verdict the decision actually rested on.
+        record.entry_trigger = entry_trigger
     if math_verdict is not None:
         record.math_verdict = math_verdict
 
