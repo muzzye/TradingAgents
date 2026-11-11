@@ -25,6 +25,7 @@ yet is valid and simply early.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 from tradingagents.dataflows.math.price_source import price_from_snapshot
@@ -143,6 +144,15 @@ def evaluate_entry_trigger(
                      f"unknown position direction {direction!r}",
                      entry_level=entry)
 
+    # FIX #5 final (B): the snapshot and its provenance are two descriptions
+    # of one observation. When they disagree about the stamp or the value, the
+    # decision would be checking one number and acting on another, so nothing
+    # may rest on it until the disagreement is resolved.
+    incoherence = _snapshot_incoherence(snapshot)
+    if incoherence:
+        return _fail(TriggerOutcome.NOT_EVALUABLE, resolved_mode, incoherence,
+                     entry_level=entry, session_date=trade_date)
+
     price = price_from_snapshot(snapshot)
     if price is None:
         return _fail(
@@ -217,6 +227,57 @@ def evaluate_entry_trigger(
         session_date=trade_date, valid_until=valid_until,
     )
     return verdict
+
+
+def _instant(value) -> datetime | None:
+    """A timezone-aware instant, or None when the stamp cannot be placed."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _snapshot_incoherence(snapshot) -> str:
+    """Why a snapshot contradicts itself, or an empty string when it does not.
+
+    Two fields can describe the same observation: the snapshot's own
+    `price_as_of` and `close`, and the provenance's `timestamp` and `value`.
+    They are written by different layers, so they can drift. A disagreement is
+    not a small thing — `_market_open_at` reads one and the trigger the other,
+    which is how a decision checked the freshness of 13:00 and acted on a quote
+    declaring 18:00.
+    """
+    if not isinstance(snapshot, dict):
+        return ""
+    provenance = snapshot.get("price_provenance")
+    if not isinstance(provenance, dict):
+        return ""
+
+    shown = snapshot.get("price_as_of")
+    declared = provenance.get("timestamp")
+    if shown and declared:
+        a, b = _instant(shown), _instant(declared)
+        if a is None or b is None:
+            return ("the snapshot's timestamp cannot be placed in time, so it "
+                    "cannot be shown to describe this observation")
+        if a != b:
+            return (f"the snapshot is stamped {shown} but its provenance "
+                    f"declares {declared}: two observations, not one")
+
+    close = snapshot.get("close")
+    claimed = provenance.get("value")
+    if close is not None and claimed is not None:
+        try:
+            if abs(float(close) - float(claimed)) > 1e-9:
+                return (f"the snapshot says the price is {close} while its "
+                        f"provenance says {claimed}: the same observation "
+                        "cannot have two prices")
+        except (TypeError, ValueError):
+            return "the snapshot's price or its provenance is not a number"
+    return ""
 
 
 def executable_price(verdict: TriggerVerdict, *,

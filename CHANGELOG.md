@@ -19,6 +19,51 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-11-11
+
+### Fixed
+
+- **An `EOD_CONFIRMED` bar was certified as a settled close whatever its
+  stamp.** `qualified_price()` set `kind = eod_close` and
+  `validation_status = VERIFIED` from `bar_finality` alone, so a bar stamped
+  13:00 New York — one hour and a half before a 15:00 early close, three hours
+  before the regular one — was a "settled close". The calendar can refute the
+  claim, and now does: the stamp must be timezone-aware, its New York day must
+  be a session the calendar knows, it must be at or after that session's close
+  (13:00 on an early-close day, 16:00 otherwise), and it must fall on the day
+  its `session_date` names. A contradiction is `UNVERIFIED`, so neither a
+  valuation nor a trigger can rest on it.
+
+  Absence is not contradiction: a bar with no timestamp keeps `VERIFIED`,
+  because a daily bar is settled by definition and `bar_finality` already
+  asserts it. Refusing the absent case broke every caller that supplies a
+  session date and no intraday instant, which is the normal shape for an EOD
+  bar — measured as 40 failing tests before the rule was narrowed.
+
+- **The snapshot and its provenance could describe different observations.**
+  `_market_open_at` read `snapshot["price_as_of"]` and
+  `evaluate_entry_trigger` read `price_provenance["timestamp"]`. When the two
+  disagreed, freshness was checked against one stamp and the decision acted on
+  another: a quote stamped 13:00 with a provenance declaring 18:00 passed a
+  13:01 freshness check. The trigger now refuses a snapshot whose two stamps
+  disagree, or whose `close` contradicts `price_provenance.value`, and names
+  the disagreement in the audit. A stamp that cannot be placed in time fails
+  closed.
+
+- **A quote from the future could open a position.** The trigger has no
+  decision moment of its own, so it could not judge "future" — a settle at
+  16:00 read at 13:01 is data nobody had. The gate holds the clock and now
+  refuses the proposal when the observed stamp post-dates `decision_as_of`, or
+  when either instant cannot be parsed.
+
+### Changed
+
+- Test fixtures across `test_fix2`, `test_fix3`, `test_fix4`, `test_fix5*`
+  stamped `EOD_CONFIRMED` at 13:00 New York. A settled close cannot exist
+  there, so those fixtures now use a mid-session intraday print or a genuine
+  16:00 close. Two tests that asserted the previous, incorrect behaviour were
+  updated with a note explaining what superseded them.
+
 ## [0.9.2] — 2026-11-11
 
 ### Fixed

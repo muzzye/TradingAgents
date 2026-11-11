@@ -40,7 +40,7 @@ def _stamp(hour: int, minute: int = 0, *, day: str = TRADE_DATE) -> str:
 
 
 def _snapshot(price: float, *, stamp: str | None = None,
-              finality: str = "EOD_CONFIRMED", status: str | None = None,
+              finality: str = "INTRADAY_PARTIAL", status: str | None = None,
               kind: str | None = None) -> dict:
     stamp = stamp if stamp is not None else _stamp(13, 0)
     provenance = qualified_price(
@@ -55,7 +55,7 @@ def _snapshot(price: float, *, stamp: str | None = None,
 
 
 def _verdict(entry=540.00, mode="PULLBACK", direction="LONG", *,
-             price=530.00, stamp=None, finality="EOD_CONFIRMED"):
+             price=530.00, stamp=None, finality="INTRADAY_PARTIAL"):
     return evaluate_entry_trigger(
         entry=entry, mode=mode, direction=direction,
         snapshot=_snapshot(price, stamp=stamp, finality=finality),
@@ -71,8 +71,9 @@ def _registry():
     return build_run_registry(
         RunInputs(price=530.00,
                   price_provenance=qualified_price(
-                      TICKER, 530.00, bar_finality="EOD_CONFIRMED",
-                      session_date=TRADE_DATE),
+                      TICKER, 530.00, bar_finality="INTRADAY_PARTIAL",
+                      session_date=TRADE_DATE,
+                      observation_timestamp=_stamp(13, 0)),
                   eps_ttm=2.0, weighted_average_shares=1e9),
         run_id="fix5r2")
 
@@ -164,7 +165,7 @@ class TestProblemALimitSizingUsesTheLimit:
     def test_a_market_order_still_sizes_on_the_worse_of_the_two(self):
         """The breakout rule is unchanged: pay at least the market."""
         verdict = _verdict(entry=540.00, mode="BREAKOUT", price=550.00,
-                           finality="EOD_CONFIRMED")
+                           finality="INTRADAY_PARTIAL")
         assert executable_price(verdict, direction="LONG") == 550.00
 
 
@@ -242,10 +243,9 @@ class TestProblemBQuoteFreshness:
             TICKER, 530.00, bar_finality="EOD_CONFIRMED",
             session_date=TRADE_DATE,
             observation_timestamp=_stamp(13, 0))
-        # The provenance layer already refuses to verify this combination.
-        assert provenance["validation_status"] == "VERIFIED", (
-            "qualified_price does not currently cross-check the stamp against "
-            "the finality; the caller must")
+        # The provenance layer now refuses this combination itself: a 13:00
+        # stamp is inside the session, so the bar it describes has not settled.
+        assert provenance["validation_status"] == "UNVERIFIED"
 
     def test_the_threshold_is_explicit_and_configurable(self, tmp_path):
         """No hidden constant: the caller can state the tolerance."""

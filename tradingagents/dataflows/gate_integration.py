@@ -498,8 +498,33 @@ def evaluate_decision(
 
     # FIX #5: when a deterministic verdict is supplied it is the truth; the
     # boolean is only for callers that computed the answer themselves.
+    #
+    # FIX #5 final (B): and it must not post-date the decision. The trigger has
+    # no decision moment of its own, so it cannot judge "future" — a settle at
+    # 16:00 read at 13:01 is data nobody had. The gate holds the clock, so the
+    # check belongs here, applied to the stamp actually associated with the
+    # price.
     if entry_trigger is not None:
         trigger_met = bool(getattr(entry_trigger, "met", False))
+        if trigger_met:
+            observed_stamp = getattr(entry_trigger, "observed_timestamp", None)
+            moment = decision_as_of
+            if observed_stamp and moment:
+                from datetime import datetime as _dt
+
+                def _as_instant(value):
+                    try:
+                        parsed = _dt.fromisoformat(
+                            str(value).replace("Z", "+00:00"))
+                    except (TypeError, ValueError):
+                        return None
+                    return parsed if parsed.tzinfo is not None else None
+
+                quote_at, decided_at = _as_instant(observed_stamp), _as_instant(moment)
+                if quote_at is None or decided_at is None or quote_at > decided_at:
+                    # A quote from the future, or one that cannot be placed in
+                    # time, cannot open a position.
+                    trigger_met = False
 
     plan = PlanInput(
         ticker=ticker,

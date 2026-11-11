@@ -18,10 +18,12 @@ TRADE_DATE = "2026-11-10"
 # 16:00 New York, the close: an EOD_CONFIRMED bar cannot be stamped
 # earlier without describing a bar still forming.
 OPEN_STAMP = f"{TRADE_DATE}T21:00:00+00:00"      # 16:00 New York
+_INTRADAY_STAMP = f"{TRADE_DATE}T18:00:00+00:00"  # 13:00 New York, mid-session
 
 
-def _snapshot(price=550.00, *, stamp=OPEN_STAMP, kind="eod_close",
+def _snapshot(price=550.00, *, stamp=None, kind="intraday",
               status="VERIFIED"):
+    stamp = stamp or _INTRADAY_STAMP
     return {
         "close": price, "price": price, "currency": "USD",
         "price_as_of": stamp,
@@ -29,7 +31,7 @@ def _snapshot(price=550.00, *, stamp=OPEN_STAMP, kind="eod_close",
             "symbol": TICKER, "value": price, "currency": "USD",
             "share_class": "B", "kind": kind, "timestamp": stamp,
             "session_date": TRADE_DATE, "source": "yfinance",
-            "bar_finality": "EOD_CONFIRMED", "validation_status": status,
+            "bar_finality": "INTRADAY_PARTIAL", "validation_status": status,
         },
     }
 
@@ -64,8 +66,9 @@ def _registry():
     return build_run_registry(
         RunInputs(price=550.00,
                   price_provenance=qualified_price(
-                      TICKER, 550.00, bar_finality="EOD_CONFIRMED",
-                      session_date=TRADE_DATE),
+                      TICKER, 550.00, bar_finality="INTRADAY_PARTIAL",
+                      session_date=TRADE_DATE,
+                      observation_timestamp=_INTRADAY_STAMP),
                   eps_ttm=2.0, weighted_average_shares=1e9),
         run_id="fix5r")
 
@@ -351,7 +354,7 @@ class TestThePropagateEntryPoint:
             "close": price, "price": price, "currency": "USD",
             "price_as_of": self.STAMP,
             "price_provenance": qualified_price(
-                TICKER, price, bar_finality="EOD_CONFIRMED",
+                TICKER, price, bar_finality="INTRADAY_PARTIAL",
                 session_date=TRADE_DATE, observation_timestamp=self.STAMP),
         }
         final_state = {
