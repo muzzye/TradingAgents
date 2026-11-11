@@ -146,6 +146,7 @@ _TEXT_SCALES = (
     ("trillion", 1e12), ("tn", 1e12), ("t", 1e12),
     ("miliardi", 1e9), ("miliardo", 1e9), ("billion", 1e9), ("bn", 1e9), ("b", 1e9),
     ("milioni", 1e6), ("milione", 1e6), ("million", 1e6), ("mn", 1e6), ("m", 1e6),
+    ("migliaia", 1e3), ("thousand", 1e3), ("k", 1e3),
 )
 _FACT_UNIT_SCALES = {
     "usd_trillion": 1e12, "usd_billion": 1e9, "usd_million": 1e6,
@@ -174,13 +175,22 @@ def _stated_value(statement: str) -> float | None:
 
 
 def _fact_value(fact) -> float | None:
-    """The fact's own number in base units, scaled by its unit."""
+    """The fact's own number in base units, scaled by its unit.
+
+    A non-finite value is not a quantity. `NaN != NaN` in every comparison, so
+    a NaN fact would sail past the contradiction test and certify whatever it
+    was cited for — a fact the engine cannot reason about is not evidence.
+    """
+    import math
+
     raw = getattr(fact, "value", None)
     if isinstance(raw, bool) or raw is None:
         return None
     try:
         number = float(raw)
     except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
         return None
     unit = str(getattr(fact, "unit", "") or "").lower().strip()
     return number * _FACT_UNIT_SCALES.get(unit, 1.0)
@@ -359,6 +369,24 @@ def check_claim(
     # A verified fact id does not certify any sentence naming it — a sentence
     # stating 74,322 million while citing a 105,647 million fact is
     # contradicted by its own support.
+    # A cited fact whose value is not a readable number cannot support a
+    # quantitative claim: there is nothing to compare it to. Recorded as
+    # unverified rather than supported, so a broken fact is never evidence.
+    unreadable = [
+        fid for fid in claim.supporting_fact_ids
+        if registry.get(fid) is not None and _fact_value(registry.get(fid)) is None
+        and _NUMBER_IN_TEXT.search(claim.statement or "") is not None
+    ]
+    if unreadable:
+        return ClaimVerdict(
+            claim_id=claim.claim_id, statement=claim.statement,
+            classification=claim.classification,
+            supporting_fact_ids=claim.supporting_fact_ids,
+            status=ClaimStatus.UNVERIFIED,
+            reason_code=ReasonCode.SUPPORTING_FACTS_UNVERIFIED,
+            blocking=claim.blocking,
+        )
+
     for fact_id in claim.supporting_fact_ids:
         fact = registry.get(fact_id)
         if fact is not None and _contradicts(claim.statement, fact):
