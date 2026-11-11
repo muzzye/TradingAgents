@@ -62,6 +62,12 @@ class GateReason(StrEnum):
     # quantity can exist. Distinct from RISK_PLAN_BLOCKED, which means a plan
     # that did carry its numbers failed a check.
     RISK_PLAN_INCOMPLETE = "RISK_PLAN_INCOMPLETE"
+    # FIX #6: the Fact Checker refuted a material claim, so the decision rests
+    # on an assertion the run's own evidence contradicts.
+    FACT_CHECK_BLOCKED = "FACT_CHECK_BLOCKED"
+    # FIX #6: the checker itself failed. Not a pass — an unchecked decision is
+    # not a verified one (invariant I5).
+    FACT_CHECK_FAILED = "FACT_CHECK_FAILED"
     DATA_QUALITY_BLOCKED = "DATA_QUALITY_BLOCKED"
     STALE_SIGNAL = "STALE_SIGNAL"
     MARKET_CLOSED = "MARKET_CLOSED"

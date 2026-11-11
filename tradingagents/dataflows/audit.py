@@ -87,6 +87,10 @@ class AuditRecord:
     # which price, with whose provenance and stamp. Recorded as data so a
     # reader can see *why* a plan was allowed to propose, not only that it was.
     entry_trigger: object | None = None
+    # FIX #6: the Fact Checker's verdicts and the coverage it had. `None`
+    # means it did not run; a dict with `checked: False` means it ran and
+    # failed — two different things a reader must be able to tell apart.
+    fact_check_audit: dict | None = None
 
     # Market snapshot as validated (None fields stay None: never invented).
     session_date: str | None = None
@@ -127,6 +131,10 @@ class AuditRecord:
                 "horizon_months": list(strategic.horizon_months)
                 if strategic and strategic.horizon_months else None,
             },
+            # FIX #6: the Fact Checker's verdicts, with the coverage it had.
+            # `None` means it did not run; `checked: False` means it ran and
+            # failed. A reader must be able to tell those from "clean".
+            "fact_check": self.fact_check_audit,
             "execution": self._execution_entry(),
             "risk": self._risk_entry(),
             "data_quality": self._data_quality_entry(),
