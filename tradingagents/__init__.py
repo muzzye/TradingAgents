@@ -1,6 +1,6 @@
 """TradingAgents: multi-agent LLM financial trading framework."""
 
-__version__ = "0.10.1"
+__version__ = "0.11.0"
 
 from dotenv import find_dotenv, load_dotenv
 

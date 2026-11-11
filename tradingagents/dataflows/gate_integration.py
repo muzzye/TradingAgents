@@ -425,10 +425,20 @@ def evaluate_decision(
     # disproves blocks here rather than relying on a prompt asking the model
     # not to compute.
     report_validations = []
+    # FIX #7: every source a decision can rest on. Fix #6 checked three —
+    # market, fundamentals, news — and left out exactly the four places where
+    # a manager can introduce or repeat a figure after the analysts finished:
+    # the sentiment report, the investment plan, the trader plan and the final
+    # decision itself. A false number in any of those reached the gate
+    # unexamined.
     reports_to_check = {
         "market": final_state.get("market_report"),
         "fundamentals": final_state.get("fundamentals_report"),
         "news": final_state.get("news_report"),
+        "sentiment": final_state.get("sentiment_report"),
+        "investment_plan": final_state.get("investment_plan"),
+        "trader_investment_plan": final_state.get("trader_investment_plan"),
+        "final_trade_decision": final_state.get("final_trade_decision"),
     }
     for agent_name, text in reports_to_check.items():
         if not isinstance(text, str) or not text:
@@ -507,10 +517,20 @@ def evaluate_decision(
             post_event_status=(causal.status if causal is not None else None),
         )
         fact_check_audit = claims_for_audit(fact_check_report, claim_collection)
-        if fact_check_report.blocks_decision:
+        # FIX #7: a material claim the system could not verify is blocked too.
+        # A decision resting on an unverified figure is not a verified
+        # decision, and "we had no evidence" is not a reason to proceed.
+        if (fact_check_report.blocks_decision
+                or claim_collection.unverifiable_material_ids):
             data_quality_blocked = True
             math_reasons = tuple(dict.fromkeys(
                 tuple(math_reasons) + (GateReason.FACT_CHECK_BLOCKED,)))
+        # FIX #7 (5.4): a truncated report is a bounded sample. The gate must
+        # not read it as a complete check.
+        if claim_collection.truncated:
+            data_quality_blocked = True
+            math_reasons = tuple(dict.fromkeys(
+                tuple(math_reasons) + (GateReason.FACT_CHECK_INCOMPLETE,)))
     except Exception:  # noqa: BLE001 — fail closed, never a silent pass
         logger.exception("Fact Checker failed for %s on %s", ticker, trade_date)
         fact_check_report = None
