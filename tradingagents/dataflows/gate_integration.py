@@ -149,6 +149,16 @@ def evaluate_decision(
     stop: float | None = None,
     atr: float | None = None,
     trigger_met: bool = False,
+    # FIX #5: the deterministic verdict from `entry_trigger.evaluate_entry_trigger`.
+    # When supplied it decides `trigger_met` and is recorded in the audit, so
+    # the decision does not rest on a bare boolean a caller asserted. A caller
+    # that already knows the answer may still pass `trigger_met` alone; the
+    # production path passes the verdict.
+    entry_trigger=None,
+    # FIX #5 review (C): the instant the decision is finalised, injectable so a
+    # test can freeze the clock. Distinct from the quote's timestamp: the
+    # session that matters is the one at decision time.
+    decision_as_of: str | None = None,
     market_open: bool = True,
     # P0 data-quality inputs (all optional; absent checks are not guessed).
     fundamentals_filings: list | None = None,
@@ -236,7 +246,23 @@ def evaluate_decision(
     risk_blocked = False
     risk_reasons = ()
     sizing = None
-    if eff_entry is not None and eff_stop is not None and eff_atr is not None:
+
+    # FIX #5 review (A): a met trigger is permission to act, not a size. Without
+    # entry, stop and ATR the engine cannot compute one, and the guard below
+    # used to skip the whole block — so the risk verdict stayed "not blocked"
+    # and the gate could propose a quantity nobody had validated. An incomplete
+    # risk plan is now a BLOCK with its own code, distinct from the sizing
+    # engine's own reasons (which speak about budget and portfolio).
+    missing_risk_inputs = [
+        name for name, value in (("entry", eff_entry), ("stop", eff_stop),
+                                 ("atr", eff_atr))
+        if value is None
+    ]
+    if missing_risk_inputs:
+        risk_blocked = True
+        risk_reasons = risk_reasons + (GateReason.RISK_PLAN_INCOMPLETE,)
+
+    if not missing_risk_inputs:
         # The ATR-buffer check uses the absolute distance so a SHORT plan's
         # stop above the entry is measured by the same rule; the side check
         # below (validate_stop_side) enforces the direction itself.
@@ -272,9 +298,37 @@ def evaluate_decision(
             # itself (`RISK_BUDGET_MISSING`, `PORTFOLIO_CONTEXT_MISSING`), so
             # a plan that could not be quantified is refused for *that*
             # cause and not for one it happens to share with a valid plan.
+            # FIX #5 review (B): size on the price the order would fill at,
+            # not on the trigger level. For a breakout already past its level
+            # the market price is higher, and sizing on the level understates
+            # the risk: 50 shares at 540 with a 520 stop risk 1,000, but the
+            # same shares bought at 550 risk 1,500 before gap and slippage.
+            sizing_entry = eff_entry
+            if entry_trigger is not None:
+                from tradingagents.dataflows.math.entry_trigger import (
+                    executable_price,
+                )
+
+                candidate = executable_price(entry_trigger,
+                                             direction=eff_direction)
+                if candidate is None:
+                    # No prudent price. But *why* matters: an ambiguous or
+                    # unevaluable trigger is a "not yet" condition the gate
+                    # already reports as a WAIT, and blocking it here would
+                    # turn a plan that simply is not ready into a
+                    # contradiction. Only a trigger the evaluator *met* — and
+                    # which therefore claims a fill — without yielding a price
+                    # is a genuine plan defect.
+                    if getattr(entry_trigger, "met", False):
+                        risk_blocked = True
+                        risk_reasons = risk_reasons + (
+                            GateReason.RISK_PLAN_INCOMPLETE,)
+                else:
+                    sizing_entry = candidate
+
             if not risk_blocked:
                 sizing = size_with_exposure_cap(
-                    entry=eff_entry, stop=eff_stop, atr=eff_atr,
+                    entry=sizing_entry, stop=eff_stop, atr=eff_atr,
                     risk_budget=risk_budget, equity=equity,
                     max_symbol_exposure=max_symbol_exposure,
                     direction=eff_direction, cash=cash,
@@ -442,6 +496,36 @@ def evaluate_decision(
         math_reasons = tuple(dict.fromkeys(
             tuple(math_reasons) + (GateReason.NO_CERTIFIED_METRIC,)))
 
+    # FIX #5: when a deterministic verdict is supplied it is the truth; the
+    # boolean is only for callers that computed the answer themselves.
+    #
+    # FIX #5 final (B): and it must not post-date the decision. The trigger has
+    # no decision moment of its own, so it cannot judge "future" — a settle at
+    # 16:00 read at 13:01 is data nobody had. The gate holds the clock, so the
+    # check belongs here, applied to the stamp actually associated with the
+    # price.
+    if entry_trigger is not None:
+        trigger_met = bool(getattr(entry_trigger, "met", False))
+        if trigger_met:
+            observed_stamp = getattr(entry_trigger, "observed_timestamp", None)
+            moment = decision_as_of
+            if observed_stamp and moment:
+                from datetime import datetime as _dt
+
+                def _as_instant(value):
+                    try:
+                        parsed = _dt.fromisoformat(
+                            str(value).replace("Z", "+00:00"))
+                    except (TypeError, ValueError):
+                        return None
+                    return parsed if parsed.tzinfo is not None else None
+
+                quote_at, decided_at = _as_instant(observed_stamp), _as_instant(moment)
+                if quote_at is None or decided_at is None or quote_at > decided_at:
+                    # A quote from the future, or one that cannot be placed in
+                    # time, cannot open a position.
+                    trigger_met = False
+
     plan = PlanInput(
         ticker=ticker,
         rating=strategic.rating if strategic else "UNKNOWN",
@@ -489,21 +573,33 @@ def evaluate_decision(
         # order have been". It used to be written only as
         # ``exposure_sizing``, so ``risk.qty_proposed`` reported null for a
         # plan that had in fact been sized.
+        # FIX #5 final review (C): every number here must follow from the
+        # others. `risk_per_share` is measured from the price the size was
+        # computed against — not the trigger level, which is a different
+        # number — and `stressed_risk_per_share` is a *unit* risk, the nominal
+        # distance plus gap and slippage, not the whole lot divided by its
+        # quantity (which shrank as the size grew and was never a per-share
+        # figure at all).
+        size_price = sizing.entry if sizing.entry is not None else eff_entry
+        nominal_per_share = (
+            abs(size_price - eff_stop)
+            if size_price is not None and eff_stop is not None else 0.0)
+        stressed_per_share = nominal_per_share
+        if sizing.qty > 0 and sizing.planned_risk:
+            stressed_per_share = sizing.planned_risk / sizing.qty
         record.sizing = SizingResult(
             qty=sizing.qty,
-            risk_per_share=abs(eff_entry - eff_stop)
-            if eff_entry is not None and eff_stop is not None else 0.0,
-            stressed_risk_per_share=(
-                abs(eff_entry - eff_stop) / sizing.qty
-                if sizing.qty > 0 and eff_entry is not None
-                and eff_stop is not None else 0.0
-            ),
+            risk_per_share=nominal_per_share,
+            stressed_risk_per_share=stressed_per_share,
             risk_budget=risk_budget or 0.0,
             planned_risk=sizing.planned_risk,
             reasons=sizing.reasons,
         )
     if arithmetic_verdicts:
         record.arithmetic_verdicts = arithmetic_verdicts
+    if entry_trigger is not None:
+        # FIX #5: the verdict the decision actually rested on.
+        record.entry_trigger = entry_trigger
     if math_verdict is not None:
         record.math_verdict = math_verdict
 
@@ -521,8 +617,16 @@ def evaluate_decision(
     # constructor refuses the contradiction either way).
     authorized = ()
     if decision.creates_order and sizing is not None and sizing.qty > 0:
+        # FIX #5 final review (C): the reference price is the one the size was
+        # computed against, not the trigger level. Reporting 540 for a proposal
+        # sized at 550 would describe a fill the order cannot get.
         authorized = ({"ticker": ticker, "quantity": sizing.qty,
-                       "entry": eff_entry, "stop": eff_stop},)
+                       "entry": sizing.entry if sizing.entry is not None
+                       else eff_entry,
+                       "stop": eff_stop,
+                       "trigger_level": (entry_trigger.entry_level
+                                         if entry_trigger is not None
+                                         else None)},)
     record.execution_verdict = verdict_from_gate(
         run_id=f"{ticker}-{trade_date}-{snapshot_id}",
         instrument=ticker,

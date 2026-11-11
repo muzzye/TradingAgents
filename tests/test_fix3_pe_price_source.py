@@ -251,7 +251,7 @@ class TestNoCollateralDamage:
                 price=INDICATOR_PRICE, previous_close=520.0,
                 sma50=INDICATOR_PRICE, sma200=500.0, period_high=560.0,
                 price_provenance=qualified_price(
-                    "AAPL", INDICATOR_PRICE, bar_finality="EOD_CONFIRMED"),
+                    "AAPL", INDICATOR_PRICE, bar_finality="EOD_CONFIRMED", session_date="2026-11-09"),
             ),
             run_id="fix3-qualified-levels",
         )

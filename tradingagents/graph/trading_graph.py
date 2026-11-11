@@ -520,8 +520,156 @@ class TradingAgentsGraph:
             rating=run_rating(final_state),
         )
 
+    def _evaluate_entry_trigger(self, final_state: dict, trade_date: str):
+        """FIX #5: the deterministic entry verdict for this run (§7).
+
+        Reads the plan's own labelled numbers and the run's verified snapshot.
+        Never parses the model's prose for a price and never asserts a
+        direction the plan did not state: an ambiguous plan yields AMBIGUOUS,
+        which the gate turns into WAIT rather than an order.
+
+        Best-effort like the rest of the reliability layer — a failure here
+        leaves the verdict None, the gate falls back to its `trigger_met`
+        default (False), and the run produces WAIT instead of crashing.
+        """
+        try:
+            from tradingagents.dataflows.math.entry_trigger import (
+                evaluate_entry_trigger,
+            )
+            from tradingagents.dataflows.plan_extraction import (
+                extract_plan_numbers,
+            )
+
+            plan = extract_plan_numbers(
+                final_state.get("trader_investment_plan"))
+            return evaluate_entry_trigger(
+                entry=plan.entry,
+                mode=plan.entry_mode,
+                direction=plan.direction,
+                snapshot=final_state.get("verified_market_snapshot"),
+                trade_date=trade_date,
+            )
+        except Exception:  # noqa: BLE001 — the audit must never sink the run
+            logger.exception(
+                "Entry-trigger evaluation failed for %s on %s",
+                final_state.get("company_of_interest"), trade_date)
+            return None
+
+    def _market_open_at(self, final_state: dict, trade_date: str,
+                        decision_as_of: str | None = None) -> bool:
+        """FIX #5: whether the session is open *now*, i.e. when deciding.
+
+        Reading the quote's own timestamp answered the wrong question: it says
+        whether the market was open when the price was observed, not whether it
+        is open when the order would be sent. A 13:00 quote and a 16:05
+        decision is a closed market, and the earlier version called it open.
+
+        Two separate questions, deliberately not merged:
+
+        - **session**: is the decision moment inside a trading session? The
+          exchange calendar answers this, including holidays, early closes and
+          years it does not cover (which read as closed — an unknown schedule
+          cannot certify that a session is open).
+        - **freshness**: is the quote recent enough to act on? A verified price
+          from three days ago is not a current quote. An EOD close is dated by
+          its session; an intraday quote must be from the same session as the
+          decision.
+
+        ``decision_as_of`` is injectable so tests can freeze the clock; it
+        defaults to the current UTC instant.
+        """
+        try:
+            from datetime import UTC, datetime
+
+            from tradingagents.dataflows.math.session import (
+                SessionStatus,
+                market_session_status,
+            )
+
+            snapshot = final_state.get("verified_market_snapshot") or {}
+            provenance = snapshot.get("price_provenance") or {}
+            quote_stamp = snapshot.get("price_as_of") or provenance.get(
+                "timestamp")
+            if not quote_stamp:
+                return False
+
+            moment = decision_as_of or datetime.now(UTC).isoformat()
+            if market_session_status(moment) is not SessionStatus.OPEN:
+                return False
+            # The market is open at decision time; the quote must belong to
+            # the same session, or it is history rather than a quote.
+            window = self.config.get("intraday_quote_max_age_seconds")
+            return self._quote_is_current(quote_stamp, moment, provenance,
+                                          max_age_seconds=window)
+        except Exception:  # noqa: BLE001 — never assume open on a failure
+            logger.exception("Market-session check failed for %s", trade_date)
+            return False
+
+    # How old an intraday quote may be and still authorize a proposal.
+    # Explicit and configurable rather than a hidden constant: a caller that
+    # wants a tighter or looser window states it, and the default is named here
+    # so the audit trail can point at it. 300 s is five minutes — a print older
+    # than that is not the market the order would meet.
+    DEFAULT_INTRADAY_QUOTE_MAX_AGE_SECONDS = 300
+
+    @classmethod
+    def _quote_is_current(cls, quote_stamp: str, decision_as_of: str,
+                          provenance: dict,
+                          max_age_seconds: float | None = None) -> bool:
+        """Whether a verified quote is fresh enough to act on now.
+
+        Two questions, both answered on timezone-aware instants rather than on
+        string prefixes — the previous version compared calendar days, so a
+        09:30 quote looked current at 15:59, and a quote stamped in the future
+        was accepted because its day matched.
+
+        - it must not be from the future: data that does not exist yet cannot
+          authorize anything, and a clock skew must fail closed;
+        - its age must be within the configured window.
+
+        An **EOD** close is a settled print for its session, not a live quote:
+        it is dated by the session and cannot be aged like an intraday tick, so
+        comparing it to a decision moment minutes later would reject every
+        legitimate end-of-day run. It is required to belong to the decision's
+        calendar day instead, and the caller still sees the session status from
+        the calendar.
+
+        An unparseable stamp is refused — fail closed.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        def _parse(value):
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return None
+            if parsed.tzinfo is None:
+                return None          # a naive stamp cannot be placed in time
+            return parsed.astimezone(UTC)
+
+        quote = _parse(quote_stamp)
+        decision = _parse(decision_as_of)
+        if quote is None or decision is None:
+            return False
+
+        # A future stamp cannot authorize anything, whatever the kind: the
+        # data does not exist yet, or a clock is skewed. This applies to an EOD
+        # close too — a 16:00 close read at 13:00 is not a print anyone had.
+        if quote > decision:
+            return False
+
+        kind = str((provenance or {}).get("kind") or "").lower()
+        if kind == "eod_close":
+            # A settled close is current for its own session, not for a moment
+            # later in the day, and it is not aged like an intraday tick.
+            return quote.date() == decision.date()
+        window = (cls.DEFAULT_INTRADAY_QUOTE_MAX_AGE_SECONDS
+                  if max_age_seconds is None else float(max_age_seconds))
+        return (decision - quote) <= timedelta(seconds=window)
+
     def _evaluate_reliability(self, company_name, trade_date, final_state,
-                              portfolio=None, run_registry=None):
+                              portfolio=None, run_registry=None,
+                              decision_as_of=None):
         """Run the decision through the Execution Gate and write the audit.
 
         Best-effort by design: a reliability-layer failure must not lose the
@@ -556,6 +704,15 @@ class TradingAgentsGraph:
         # with another run of the same instrument on the same day.
         from tradingagents.dataflows import run_record as rr
         run_id = rr.new_run_id(company_name)
+
+        # FIX #5: the entry trigger is evaluated here, deterministically, from
+        # the plan's own numbers and the run's verified snapshot. The gate has
+        # always accepted `trigger_met`; nothing supplied one, so the default
+        # False meant this path could only ever emit WAIT and
+        # PROPOSE_PAPER_ORDER was unreachable.
+        trigger = self._evaluate_entry_trigger(final_state, trade_date)
+        market_open = self._market_open_at(final_state, trade_date,
+                                           decision_as_of=decision_as_of)
         try:
             record, decision = evaluate_decision(
                 company_name, trade_date, final_state,
@@ -567,6 +724,10 @@ class TradingAgentsGraph:
                 fundamentals_filings=filings,
                 used_fundamentals_period_end=used_end,
                 metric_registry=registry,
+                entry_trigger=trigger,
+                market_open=market_open,
+                decision_as_of=decision_as_of,
+                price_snapshot=final_state.get("verified_market_snapshot"),
                 **_portfolio_sizing_inputs(self.config, portfolio, company_name),
             )
             attach_to_state(final_state, decision)

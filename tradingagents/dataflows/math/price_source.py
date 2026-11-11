@@ -16,6 +16,69 @@ from a caller's opinion.
 
 from __future__ import annotations
 
+from datetime import datetime
+
+
+def _parse_instant(value) -> datetime | None:
+    """A timezone-aware instant, or None. A naive stamp cannot be placed."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
+
+
+_US_EASTERN = "America/New_York"
+
+
+def _eod_stamp_settles(timestamp, session_date) -> bool:
+    """Whether an `EOD_CONFIRMED` stamp can actually be a settled close.
+
+    Three conditions, all checked against the exchange calendar rather than
+    assumed:
+
+    - the stamp parses as a timezone-aware instant;
+    - its New York calendar day is a trading day with a session;
+    - it is at or after that session's close (13:00 on an early-close day,
+      16:00 otherwise), so the bar it describes has finished forming.
+
+    ``session_date``, when given, must match the stamp's New York day: a bar
+    cannot close a session it is not part of.
+
+    When the stamp is absent the session date still decides. A daily bar is
+    settled *for its session*, which is a claim about the date, not about the
+    instant — so an EOD bar dated Thanksgiving, a Saturday or a year the
+    calendar does not describe names a session that never happened. Only a
+    trading day that the calendar knows supports the certification without an
+    instant; with no session date either, nothing identifies the session and
+    the claim cannot be verified.
+    """
+    from tradingagents.dataflows.math.exchange_calendar import session_day
+
+    if not timestamp:
+        if not session_date:
+            return False
+        # Validate the date itself: it must be a session the calendar knows.
+        declared = session_day(str(session_date)[:10])
+        return bool(declared.trades)
+
+    instant = _parse_instant(timestamp)
+    if instant is None:
+        return False
+    from zoneinfo import ZoneInfo
+
+    local = instant.astimezone(ZoneInfo(_US_EASTERN))
+    day = session_day(local.date().isoformat())
+    if not day.trades or day.closes is None:
+        return False
+    if session_date and str(session_date)[:10] != local.date().isoformat():
+        return False
+    return local.time() >= day.closes
+
 
 def qualified_price(
     symbol: str,
@@ -45,7 +108,15 @@ def qualified_price(
     """
     finality = (bar_finality or "").upper()
     if finality == "EOD_CONFIRMED":
-        kind, status = "eod_close", "VERIFIED"
+        kind = "eod_close"
+        # FIX #5 final (A): an EOD close is a claim about *time* — that the
+        # session has finished and this is its settled print. The calendar can
+        # refute it: a 13:00 New York stamp is inside the session, a holiday
+        # has no close at all, and a stamp on another day closes nothing. A
+        # contradiction is UNVERIFIED, so no valuation and no trigger can rest
+        # on it.
+        status = ("VERIFIED" if _eod_stamp_settles(
+            observation_timestamp, session_date) else "UNVERIFIED")
     elif finality == "INTRADAY_PARTIAL":
         # An intraday price is only usable with the moment it was observed:
         # without a stamp there is no way to tell a mid-session print from a

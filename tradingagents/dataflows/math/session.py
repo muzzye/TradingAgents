@@ -149,21 +149,37 @@ def market_session_status(
 ) -> SessionStatus:
     """Classify a moment against the regular session.
 
-    Weekends are ``CLOSED`` without consulting a holiday calendar: a weekday
-    holiday will read as ``AFTER_HOURS`` or ``PRE_MARKET``, which is
-    conservative — the bar for a holiday is not usable as a fresh close
-    either way, and the caller still sees a non-``OPEN`` status.
+    The exchange calendar decides whether the day trades at all, and which
+    session bounds apply: a holiday is ``CLOSED``, an early close ends at 13:00
+    New York, and a year the calendar does not describe is ``CLOSED`` too —
+    an unknown schedule cannot certify that a session is open.
     """
     instant, _has_time = _parse_timestamp(moment, tz)
     if instant is None:
         return SessionStatus.UNKNOWN
     local = instant.astimezone(_zone(tz))
-    if local.weekday() in _WEEKEND:
+
+    # FIX #5 review: consult the exchange calendar, not only the weekday.
+    # The docstring below used to accept weekends alone, which reported
+    # Thanksgiving and an early close as OPEN: a decision finalised on a
+    # holiday would have been treated as tradeable. The calendar knows the
+    # holidays, the early closes and the years it does not describe.
+    from tradingagents.dataflows.math.exchange_calendar import session_day
+
+    day = session_day(local.date().isoformat())
+    if not day.trades:
+        # A holiday, a weekend, or a year the calendar does not cover. The
+        # uncovered case is not "trading by default": an unknown schedule
+        # cannot certify a session is open, so it is CLOSED here and the
+        # caller's fail-closed rule does the rest.
         return SessionStatus.CLOSED
+
+    opening = day.opens or session_open
+    closing = day.closes or session_close
     clock = local.time()
-    if clock < session_open:
+    if clock < opening:
         return SessionStatus.PRE_MARKET
-    if clock < session_close:
+    if clock < closing:
         return SessionStatus.OPEN
     return SessionStatus.AFTER_HOURS
 

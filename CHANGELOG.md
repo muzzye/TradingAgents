@@ -19,6 +19,235 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-11-11
+
+### Fixed
+
+- **An EOD close with no timestamp skipped the calendar entirely.** The previous
+  rule returned `VERIFIED` as soon as `timestamp` was missing, on the argument
+  that a daily bar is settled by definition. That holds for the *bar*, not for
+  the *date*: a close dated Thanksgiving, a Saturday or a year the calendar does
+  not describe names a session that never happened. Measured before:
+
+  | `session_date` | Before | After |
+  |---|---|---|
+  | 2026-11-10 (trading day) | VERIFIED | VERIFIED |
+  | 2026-11-26 (Thanksgiving) | **VERIFIED** | `UNVERIFIED` |
+  | 2026-11-28 (Saturday) | **VERIFIED** | `UNVERIFIED` |
+  | 2030-06-10 (uncovered year) | **VERIFIED** | `UNVERIFIED` |
+  | *(absent)* | **VERIFIED** | `UNVERIFIED` |
+
+  The session date is now validated through the exchange calendar whether or not
+  an instant is supplied. A valid trading day still certifies a normal daily
+  bar without one; with no session date either, nothing identifies the session
+  and the claim cannot be verified. The existing checks for a present timestamp
+  — timezone awareness, matching day, regular or early close — are unchanged.
+
+  The consequence is asserted, not assumed: a close dated a holiday no longer
+  reaches a `VERIFIED` metric.
+
+### Changed
+
+- Fixtures in `test_fix2`, `test_fix3` and `test_fix5` called
+  `qualified_price(..., bar_finality="EOD_CONFIRMED")` with neither a session
+  date nor a timestamp. That shape is now `UNVERIFIED` by design, so those
+  fixtures declare the session they belong to. The rule was not relaxed for
+  them.
+
+## [0.9.3] — 2026-11-11
+
+### Fixed
+
+- **An `EOD_CONFIRMED` bar was certified as a settled close whatever its
+  stamp.** `qualified_price()` set `kind = eod_close` and
+  `validation_status = VERIFIED` from `bar_finality` alone, so a bar stamped
+  13:00 New York — one hour and a half before a 15:00 early close, three hours
+  before the regular one — was a "settled close". The calendar can refute the
+  claim, and now does: the stamp must be timezone-aware, its New York day must
+  be a session the calendar knows, it must be at or after that session's close
+  (13:00 on an early-close day, 16:00 otherwise), and it must fall on the day
+  its `session_date` names. A contradiction is `UNVERIFIED`, so neither a
+  valuation nor a trigger can rest on it.
+
+  Absence is not contradiction: a bar with no timestamp keeps `VERIFIED`,
+  because a daily bar is settled by definition and `bar_finality` already
+  asserts it. Refusing the absent case broke every caller that supplies a
+  session date and no intraday instant, which is the normal shape for an EOD
+  bar — measured as 40 failing tests before the rule was narrowed.
+
+- **The snapshot and its provenance could describe different observations.**
+  `_market_open_at` read `snapshot["price_as_of"]` and
+  `evaluate_entry_trigger` read `price_provenance["timestamp"]`. When the two
+  disagreed, freshness was checked against one stamp and the decision acted on
+  another: a quote stamped 13:00 with a provenance declaring 18:00 passed a
+  13:01 freshness check. The trigger now refuses a snapshot whose two stamps
+  disagree, or whose `close` contradicts `price_provenance.value`, and names
+  the disagreement in the audit. A stamp that cannot be placed in time fails
+  closed.
+
+- **A quote from the future could open a position.** The trigger has no
+  decision moment of its own, so it could not judge "future" — a settle at
+  16:00 read at 13:01 is data nobody had. The gate holds the clock and now
+  refuses the proposal when the observed stamp post-dates `decision_as_of`, or
+  when either instant cannot be parsed.
+
+### Changed
+
+- Test fixtures across `test_fix2`, `test_fix3`, `test_fix4`, `test_fix5*`
+  stamped `EOD_CONFIRMED` at 13:00 New York. A settled close cannot exist
+  there, so those fixtures now use a mid-session intraday print or a genuine
+  16:00 close. Two tests that asserted the previous, incorrect behaviour were
+  updated with a note explaining what superseded them.
+
+## [0.9.2] — 2026-11-11
+
+### Fixed
+
+- **A LIMIT order was sized on the observed price, not on its limit.**
+  `executable_price()` returned `min(observed, level)` for a PULLBACK, so a
+  limit buy at 540 while the market sat at 530 sized **94 shares** on 530 —
+  whose risk at the 540 limit is **1,880** against a 1,000 budget. A limit is a
+  contract: 540 is the worst price the order may pay, and sizing on anything
+  better authorizes more shares than the budget carries. The limit is now the
+  sizing price for both directions — a LONG may pay up to it, a SHORT may
+  receive only down to it. Measured after the fix: **50 shares, risk 1,000**.
+
+- **Quote freshness compared calendar-day prefixes.** `_quote_is_current()`
+  accepted any two stamps on the same UTC day, so a 09:30 quote was "current"
+  at 15:59, and a quote stamped *after* the decision was accepted because its
+  day matched. It now compares timezone-aware instants and enforces three
+  rules: the quote must not post-date the decision, its age must fall within a
+  configurable window, and a naive or unparseable stamp fails closed. The
+  window is explicit — `intraday_quote_max_age_seconds`, defaulting to
+  `DEFAULT_INTRADAY_QUOTE_MAX_AGE_SECONDS` (300 s) — rather than a hidden
+  constant. An EOD close is not aged like a tick: it is dated by its session
+  and must belong to the decision's calendar day.
+
+- **The risk record did not add up.** `risk_per_share` was measured from the
+  trigger level (540) rather than the price the size was computed against
+  (550), and `stressed_risk_per_share` was `abs(entry - stop) / qty` — the
+  whole lot divided by its quantity, which shrinks as the size grows and was
+  never a per-share figure. It is now the nominal unit risk measured from the
+  sizing price, raised to the stressed unit risk when a size exists. The
+  authorised order reports the reference price the size used (550) and the
+  trigger level separately (540), so the audit never presents a level as a
+  fill.
+
+### Changed
+
+- `tests/test_fix5_review.py::TestTheCompiledGraphPropagate` is renamed
+  `TestThePropagateEntryPoint`: it mocks `graph.invoke`, so it exercises the
+  decision path around the graph, not the compiled graph. A genuine
+  `StateGraph` run is added in `test_fix5_final_review.py`.
+
+### Fixed — test fixtures
+
+- Several fixtures stamped an `EOD_CONFIRMED` bar at 13:00 New York. A settled
+  close cannot exist before 16:00: the bar is still forming. Those fixtures now
+  use an intraday print at 15:00, which is what a run during the session
+  actually reads, or a 16:00 close when the case is genuinely an end-of-day
+  one.
+
+## [0.9.1] — 2026-11-11
+
+### Fixed
+
+- **A met trigger with an incomplete risk plan could still propose.** The risk
+  block ran only when entry, stop *and* ATR were all present, so a plan missing
+  one of them skipped sizing entirely and left the verdict "not blocked" — the
+  gate could then propose a quantity nobody had validated. An incomplete risk
+  plan is now `BLOCK` with `RISK_PLAN_INCOMPLETE`, a code distinct from
+  `RISK_PLAN_BLOCKED` (a plan that carried its numbers and failed a check).
+  `_risk_reason_mapping` passes an existing `GateReason` through instead of
+  dropping it, so the code reaches the audit.
+
+- **Sizing used the trigger level, not the price the order would fill at.** A
+  breakout LONG whose level was 540 while the market trades 550 fills near 550.
+  Sizing 50 shares on 540 with a 520 stop reports 1,000 of risk; the same 50
+  shares bought at 550 risk 1,500 before gap and slippage. `executable_price()`
+  now yields the price the order can realistically get — the worse of observed
+  and level for a market order, the limit for a pullback — and sizing, stop,
+  cash, exposure and stress all use it. A limit buy above its own limit yields
+  no prudent price and therefore no proposal. The audit records
+  `execution.risk_sizing_price` and `execution.trigger_level` separately.
+
+- **The session was checked at the quote's timestamp, not at the decision's.**
+  `_market_open_at` asked whether the market was open when the price was
+  observed, so a 13:00 quote and a 16:05 decision read as OPEN. It now takes an
+  injectable `decision_as_of` and asks the question at that instant. Freshness
+  is a separate check: the quote must share the decision's calendar day.
+
+### Fixed — pre-existing, found while writing the tests
+
+- **`market_session_status` ignored the exchange calendar.** It consulted only
+  the weekday, so Thanksgiving 2026-11-26 and the early close on 2026-11-27 read
+  as `OPEN`. It now asks `session_day()`: a holiday is `CLOSED`, an early close
+  ends at 13:00 New York, and a year the calendar does not describe is `CLOSED`
+  too — an unknown schedule cannot certify that a session is open. This affects
+  every caller of the function, not only the trigger.
+
+### Changed
+
+- `ExposureSizingResult` carries `entry`, the price the size was computed
+  against, so a reader can see which number produced the quantity.
+- `evaluate_decision()` and `_evaluate_reliability()` accept `decision_as_of`,
+  injectable so tests can freeze the clock.
+
+## [0.9.0] — 2026-11-11
+
+### Added
+
+- **The entry trigger is evaluated in production.** `evaluate_decision()` has
+  always taken `trigger_met` as a caller's boolean, and the graph never supplied
+  one — so the default `False` meant every production run ended `WAIT` with
+  `ENTRY_TRIGGER_NOT_MET` and `PROPOSE_PAPER_ORDER` was unreachable, whatever
+  the data said. A new deterministic evaluator
+  (`dataflows/math/entry_trigger.py`) answers the plan's own entry condition
+  against the run's verified snapshot, and `_evaluate_reliability` passes its
+  verdict to the gate.
+
+  The semantics are explicit rather than inferred. `BREAKOUT` requires price
+  `>=` entry for a LONG (`<=` for a SHORT breakdown); `PULLBACK` is the mirror.
+  A plan that states an entry level and no mode is `AMBIGUOUS`, which yields no
+  proposal: `Entry 540.00` says nothing about whether the plan buys a break
+  above 540 or a dip below it, and guessing the direction would manufacture a
+  signal. This required a typed `entry_mode` field on `PlanNumbers`, defaulting
+  to `None` — deliberately not `BREAKOUT`.
+
+  The evaluator applies the same numerator rule as a valuation multiple: an
+  indicator is not a price, an unverified quote cannot open a position, and a
+  snapshot whose stamp is not the analysis date is history rather than a
+  current quote. `price_from_snapshot` supplies the provenance; `MARKET_PRICE_KINDS`
+  and `VERIFIED` decide admissibility — no second price rule was introduced.
+
+- **The market-session state is derived, not assumed.** `market_open=True` was
+  a default, so every run behaved as if the session were open. It is now read
+  from the snapshot's timestamp via `market_session_status`; a missing or
+  unreadable stamp yields `False`, and a closed market produces `WAIT` with
+  `MARKET_CLOSED`.
+
+- **The verdict is recorded in the audit.** `execution.entry_trigger` carries
+  `met`, `outcome`, `mode`, the entry level compared, the observed price, its
+  `kind` and `validation_status`, its timestamp, and the reason. It is distinct
+  from the existing `entry_triggers_satisfied`, which reports only whether the
+  gate proposed an order.
+
+### Fixed
+
+- The mode phrase's own level is now extracted. `Buy stop above 540.00` states
+  both the mode and the number, but only the `Entry` label was parsed, so the
+  mode was recognised while its level stayed `None`. An explicit `Entry` label
+  still wins when both are present.
+
+### Unchanged
+
+- The 50 existing gate tests that pass `trigger_met=True` explicitly keep
+  working: `entry_trigger` is optional and a caller-supplied boolean is still
+  honoured when no verdict is passed.
+- FIX #1–#4: no change to SEC revenue, P/B certification, price integrity or
+  P/E claim validation. Verified by the regression tests in
+  `tests/test_fix5_entry_trigger.py`.
+
 ## [0.8.27] — 2026-11-10
 
 ### Fixed

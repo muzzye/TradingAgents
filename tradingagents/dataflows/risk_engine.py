@@ -307,6 +307,10 @@ class ExposureSizingResult:
     binding_constraint: str | None    # "RISK_BUDGET" | "EXPOSURE_CAP" | None
     reasons: tuple[RiskReason, ...] = field(default_factory=tuple)
     exposure_cap_applied: bool = False
+    # FIX #5 review (B): the price the size was computed against. For a
+    # breakout already past its trigger this is the observed market price, not
+    # the level, and the audit must be able to show which was used.
+    entry: float | None = None
 
     @property
     def blocked(self) -> bool:
@@ -405,7 +409,7 @@ def size_with_exposure_cap(
 
     planned_risk = qty * stressed_risk
     return ExposureSizingResult(qty, notional, planned_risk, binding,
-                                tuple(reasons), cap_applied)
+                                tuple(reasons), cap_applied, entry=entry)
 
 
 # ---------------------------------------------------------------------------
