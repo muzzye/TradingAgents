@@ -15,7 +15,9 @@ from tradingagents.dataflows.math.price_source import qualified_price
 
 TICKER = "TEST"
 TRADE_DATE = "2026-11-10"
-OPEN_STAMP = f"{TRADE_DATE}T18:00:00+00:00"      # 13:00 New York, session open
+# 16:00 New York, the close: an EOD_CONFIRMED bar cannot be stamped
+# earlier without describing a bar still forming.
+OPEN_STAMP = f"{TRADE_DATE}T21:00:00+00:00"      # 16:00 New York
 
 
 def _snapshot(price=550.00, *, stamp=OPEN_STAMP, kind="eod_close",
@@ -28,6 +30,20 @@ def _snapshot(price=550.00, *, stamp=OPEN_STAMP, kind="eod_close",
             "share_class": "B", "kind": kind, "timestamp": stamp,
             "session_date": TRADE_DATE, "source": "yfinance",
             "bar_finality": "EOD_CONFIRMED", "validation_status": status,
+        },
+    }
+
+
+def _intraday_snapshot(price=550.00, *, stamp="2026-11-10T18:00:00+00:00"):
+    """A live print: an intraday kind cannot be stamped as a settled close."""
+    return {
+        "close": price, "price": price, "currency": "USD",
+        "price_as_of": stamp,
+        "price_provenance": {
+            "symbol": TICKER, "value": price, "currency": "USD",
+            "share_class": "B", "kind": "intraday", "timestamp": stamp,
+            "session_date": TRADE_DATE, "source": "yfinance",
+            "bar_finality": "INTRADAY_PARTIAL", "validation_status": "VERIFIED",
         },
     }
 
@@ -184,8 +200,13 @@ class TestProblemBSizingUsesAnExecutablePrice:
         if decision.action.value == "PROPOSE_PAPER_ORDER":
             assert record.exposure_sizing.qty == 33
 
-    def test_a_limit_buy_respects_its_limit(self):
-        """A pullback fills at the limit or better, never above it."""
+    def test_a_limit_buy_is_sized_on_its_limit(self):
+        """The limit is the worst price the contract allows, so it bounds the risk.
+
+        Superseded by the final review: sizing on the observed 530 authorized
+        94 shares, whose risk at the 540 limit is 1,880 against a 1,000 budget.
+        The limit is used for both directions.
+        """
         snapshot = _snapshot(price=530.00)
         verdict = _verdict(entry=540.00, mode="PULLBACK", snapshot=snapshot)
         assert verdict.met is True
@@ -193,8 +214,7 @@ class TestProblemBSizingUsesAnExecutablePrice:
             "Limit buy at 540.00, stop 520.00, ATR 1.20.",
             trigger=verdict, snapshot=snapshot)
         if decision.action.value == "PROPOSE_PAPER_ORDER":
-            # The limit caps the fill: observed 530 is better, so 530 is used.
-            assert record.exposure_sizing.entry == 530.00
+            assert record.exposure_sizing.entry == 540.00
 
     def test_the_sizing_price_is_never_better_than_the_market(self):
         """A LONG may not be sized on a price below what it would pay.
@@ -249,8 +269,17 @@ class TestProblemCTheDecisionMomentDecides:
         graph = object.__new__(TradingAgentsGraph)
         graph.config = {"results_dir": str(tmp_path)}
         state = {"verified_market_snapshot": _snapshot()}
+        # The quote is stamped 16:00 NY; a decision a minute later is inside
+        # the session and inside the freshness window.
         assert graph._market_open_at(
             state, TRADE_DATE,
+            decision_as_of="2026-11-10T21:01:00+00:00") is False, (
+            "16:01 New York is after the close")
+        # A decision while the session is still running needs a quote from
+        # the same session, which the fixture's 16:00 close is not.
+        inside = {"verified_market_snapshot": _intraday_snapshot()}
+        assert graph._market_open_at(
+            inside, TRADE_DATE,
             decision_as_of="2026-11-10T18:01:00+00:00") is True
 
     def test_a_holiday_has_no_session(self):
@@ -297,13 +326,15 @@ class TestProblemCTheDecisionMomentDecides:
             decision_as_of="2026-11-10T18:00:00+00:00") is False
 
 
-class TestTheCompiledGraphPropagate:
-    """The brief asks for the real entry point: `propagate`, not a helper.
+class TestThePropagateEntryPoint:
+    """The `propagate` entry point, with the graph invocation mocked.
 
-    `_evaluate_reliability` is where the trigger is computed, but reaching it
-    through `propagate` proves the wiring end to end: initial state → compiled
-    graph → record_decision → gate → audit. LLM providers and the graph itself
-    are mocked; the decision path is real.
+    This is **not** a test of the compiled graph. `graph.invoke` is a
+    `MagicMock`, so what runs is the decision path around it: initial state →
+    record_decision → trigger → gate → audit. That is the wiring the original
+    defect hid in, and it is worth testing — but a genuine `StateGraph` run is
+    a different question, covered in `test_fix5_final_review.py`
+    (`TestAReallyCompiledGraph`). Naming this one "compiled" would overstate it.
     """
 
     STAMP = "2026-11-10T18:00:00+00:00"

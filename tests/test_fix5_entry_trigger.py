@@ -23,11 +23,15 @@ from tradingagents.dataflows.math.entry_trigger import (
 
 TICKER = "TEST"
 TRADE_DATE = "2026-11-10"
-SESSION_STAMP = f"{TRADE_DATE}T18:00:00+00:00"      # 13:00 New York, session open
+# 15:00 New York, mid-session. An `EOD_CONFIRMED` bar cannot be stamped here —
+# a close only exists after 16:00 — so the fixture uses an intraday print,
+# which is what a run during the session actually reads. The final review asked
+# for exactly this: no 13:00 `EOD_CONFIRMED`.
+SESSION_STAMP = f"{TRADE_DATE}T20:00:00+00:00"      # 15:00 New York, session open
 
 
 def _snapshot(price=550.00, *, kind="market_price", status="VERIFIED",
-              stamp=SESSION_STAMP, finality="EOD_CONFIRMED"):
+              stamp=SESSION_STAMP, finality="INTRADAY_PARTIAL"):
     """A verified snapshot in the shape the Data Quality node writes."""
     return {
         "close": price,
@@ -526,7 +530,7 @@ class TestTheWholePathThroughTheGraph:
     a trigger.
     """
 
-    STAMP = "2026-11-10T18:00:00+00:00"
+    STAMP = "2026-11-10T20:00:00+00:00"      # 15:00 New York, session open
 
     def _snapshot(self, price=550.00):
         from tradingagents.dataflows.math.price_source import qualified_price
@@ -535,7 +539,7 @@ class TestTheWholePathThroughTheGraph:
             "close": price, "price": price, "currency": "USD",
             "price_as_of": self.STAMP,
             "price_provenance": qualified_price(
-                TICKER, price, bar_finality="EOD_CONFIRMED",
+                TICKER, price, bar_finality="INTRADAY_PARTIAL",
                 session_date=TRADE_DATE, observation_timestamp=self.STAMP),
         }
 
@@ -690,7 +694,11 @@ class TestTheWholePathThroughTheGraph:
         assert len(verdict["authorized_orders"]) == 1
         order = verdict["authorized_orders"][0]
         assert order["quantity"] > 0
-        assert order["entry"] == 540.0
+        # The reference price is the one the size was computed against (the
+        # observed 550), not the 540 trigger level: reporting the level would
+        # describe a fill the order cannot get.
+        assert order["entry"] == 550.0
+        assert order["trigger_level"] == 540.0
         # And nothing was transmitted: no broker surface exists to transmit to.
         assert execution["market_order_allowed"] is False
         module_source = inspect.getsource(execution_verdict)

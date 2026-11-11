@@ -598,23 +598,74 @@ class TradingAgentsGraph:
                 return False
             # The market is open at decision time; the quote must belong to
             # the same session, or it is history rather than a quote.
-            return self._quote_is_current(quote_stamp, moment, provenance)
+            window = self.config.get("intraday_quote_max_age_seconds")
+            return self._quote_is_current(quote_stamp, moment, provenance,
+                                          max_age_seconds=window)
         except Exception:  # noqa: BLE001 — never assume open on a failure
             logger.exception("Market-session check failed for %s", trade_date)
             return False
 
-    @staticmethod
-    def _quote_is_current(quote_stamp: str, decision_as_of: str,
-                          provenance: dict) -> bool:
-        """Whether a verified quote is fresh enough to act on at ``decision_as_of``.
+    # How old an intraday quote may be and still authorize a proposal.
+    # Explicit and configurable rather than a hidden constant: a caller that
+    # wants a tighter or looser window states it, and the default is named here
+    # so the audit trail can point at it. 300 s is five minutes — a print older
+    # than that is not the market the order would meet.
+    DEFAULT_INTRADAY_QUOTE_MAX_AGE_SECONDS = 300
 
-        Compared by calendar day in UTC: a same-day quote is current, an older
-        one is stale. An EOD close is dated by its session, so a Friday close
-        read on Saturday is stale even though nothing changed.
+    @classmethod
+    def _quote_is_current(cls, quote_stamp: str, decision_as_of: str,
+                          provenance: dict,
+                          max_age_seconds: float | None = None) -> bool:
+        """Whether a verified quote is fresh enough to act on now.
+
+        Two questions, both answered on timezone-aware instants rather than on
+        string prefixes — the previous version compared calendar days, so a
+        09:30 quote looked current at 15:59, and a quote stamped in the future
+        was accepted because its day matched.
+
+        - it must not be from the future: data that does not exist yet cannot
+          authorize anything, and a clock skew must fail closed;
+        - its age must be within the configured window.
+
+        An **EOD** close is a settled print for its session, not a live quote:
+        it is dated by the session and cannot be aged like an intraday tick, so
+        comparing it to a decision moment minutes later would reject every
+        legitimate end-of-day run. It is required to belong to the decision's
+        calendar day instead, and the caller still sees the session status from
+        the calendar.
+
+        An unparseable stamp is refused — fail closed.
         """
-        quote_day = str(quote_stamp)[:10]
-        decision_day = str(decision_as_of)[:10]
-        return quote_day == decision_day
+        from datetime import UTC, datetime, timedelta
+
+        def _parse(value):
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return None
+            if parsed.tzinfo is None:
+                return None          # a naive stamp cannot be placed in time
+            return parsed.astimezone(UTC)
+
+        quote = _parse(quote_stamp)
+        decision = _parse(decision_as_of)
+        if quote is None or decision is None:
+            return False
+
+        # A future stamp cannot authorize anything, whatever the kind: the
+        # data does not exist yet, or a clock is skewed. This applies to an EOD
+        # close too — a 16:00 close read at 13:00 is not a print anyone had.
+        if quote > decision:
+            return False
+
+        kind = str((provenance or {}).get("kind") or "").lower()
+        if kind == "eod_close":
+            # A settled close is current for its own session, not for a moment
+            # later in the day, and it is not aged like an intraday tick.
+            return quote.date() == decision.date()
+        window = (cls.DEFAULT_INTRADAY_QUOTE_MAX_AGE_SECONDS
+                  if max_age_seconds is None else float(max_age_seconds))
+        return (decision - quote) <= timedelta(seconds=window)
 
     def _evaluate_reliability(self, company_name, trade_date, final_state,
                               portfolio=None, run_registry=None,

@@ -548,15 +548,24 @@ def evaluate_decision(
         # order have been". It used to be written only as
         # ``exposure_sizing``, so ``risk.qty_proposed`` reported null for a
         # plan that had in fact been sized.
+        # FIX #5 final review (C): every number here must follow from the
+        # others. `risk_per_share` is measured from the price the size was
+        # computed against — not the trigger level, which is a different
+        # number — and `stressed_risk_per_share` is a *unit* risk, the nominal
+        # distance plus gap and slippage, not the whole lot divided by its
+        # quantity (which shrank as the size grew and was never a per-share
+        # figure at all).
+        size_price = sizing.entry if sizing.entry is not None else eff_entry
+        nominal_per_share = (
+            abs(size_price - eff_stop)
+            if size_price is not None and eff_stop is not None else 0.0)
+        stressed_per_share = nominal_per_share
+        if sizing.qty > 0 and sizing.planned_risk:
+            stressed_per_share = sizing.planned_risk / sizing.qty
         record.sizing = SizingResult(
             qty=sizing.qty,
-            risk_per_share=abs(eff_entry - eff_stop)
-            if eff_entry is not None and eff_stop is not None else 0.0,
-            stressed_risk_per_share=(
-                abs(eff_entry - eff_stop) / sizing.qty
-                if sizing.qty > 0 and eff_entry is not None
-                and eff_stop is not None else 0.0
-            ),
+            risk_per_share=nominal_per_share,
+            stressed_risk_per_share=stressed_per_share,
             risk_budget=risk_budget or 0.0,
             planned_risk=sizing.planned_risk,
             reasons=sizing.reasons,
@@ -583,8 +592,16 @@ def evaluate_decision(
     # constructor refuses the contradiction either way).
     authorized = ()
     if decision.creates_order and sizing is not None and sizing.qty > 0:
+        # FIX #5 final review (C): the reference price is the one the size was
+        # computed against, not the trigger level. Reporting 540 for a proposal
+        # sized at 550 would describe a fill the order cannot get.
         authorized = ({"ticker": ticker, "quantity": sizing.qty,
-                       "entry": eff_entry, "stop": eff_stop},)
+                       "entry": sizing.entry if sizing.entry is not None
+                       else eff_entry,
+                       "stop": eff_stop,
+                       "trigger_level": (entry_trigger.entry_level
+                                         if entry_trigger is not None
+                                         else None)},)
     record.execution_verdict = verdict_from_gate(
         run_id=f"{ticker}-{trade_date}-{snapshot_id}",
         instrument=ticker,

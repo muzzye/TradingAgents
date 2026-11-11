@@ -235,10 +235,13 @@ def executable_price(verdict: TriggerVerdict, *,
     - a SHORT sells at most the observed price, and at most its trigger — so
       the smaller.
 
-    A ``PULLBACK`` is a limit order: it fills at the limit or better, never
-    above it for a LONG, so the limit caps the price rather than the market
-    raising it. Using the observed price when it is *better* than the limit
-    would size on a price the order cannot have.
+    A ``PULLBACK`` is a *limit* order, and it is sized on the limit itself —
+    the worst price the contract permits. Sizing on the better observed price
+    would authorize a lot the budget cannot carry to the limit: a limit buy at
+    540 while the market sits at 530 sizes 100 shares on 530, whose risk at the
+    limit is 2,000 against a 1,000 budget. The limit is the prudent price for
+    both directions: a LONG may pay up to it, a SHORT may receive only down to
+    it.
     """
     if verdict.observed_price is None or verdict.entry_level is None:
         return None
@@ -246,9 +249,16 @@ def executable_price(verdict: TriggerVerdict, *,
     level = float(verdict.entry_level)
 
     if verdict.mode is EntryMode.PULLBACK:
-        # A limit caps the fill. LONG: never above the limit. SHORT: never
-        # below it.
-        return min(observed, level) if direction == "LONG" else max(observed, level)
+        # A LIMIT order is sized on its limit, which is the *worst* price the
+        # contract permits — not on the better market price. A limit buy at 540
+        # while the market sits at 530 may still fill at 540, and sizing on 530
+        # would authorize more shares than the budget can carry to the limit:
+        # 1,000 / (530 - 520) = 100 shares, whose risk at 540 is 2,000.
+        #
+        # Using the worse price can only make the size smaller, which is the
+        # safe direction. The trigger itself is still checked against the
+        # observed price, so a plan whose condition is unmet stays a WAIT.
+        return level
     # A market/breakout order pays what the market offers.
     return max(observed, level) if direction == "LONG" else min(observed, level)
 

@@ -19,6 +19,55 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-11-11
+
+### Fixed
+
+- **A LIMIT order was sized on the observed price, not on its limit.**
+  `executable_price()` returned `min(observed, level)` for a PULLBACK, so a
+  limit buy at 540 while the market sat at 530 sized **94 shares** on 530 —
+  whose risk at the 540 limit is **1,880** against a 1,000 budget. A limit is a
+  contract: 540 is the worst price the order may pay, and sizing on anything
+  better authorizes more shares than the budget carries. The limit is now the
+  sizing price for both directions — a LONG may pay up to it, a SHORT may
+  receive only down to it. Measured after the fix: **50 shares, risk 1,000**.
+
+- **Quote freshness compared calendar-day prefixes.** `_quote_is_current()`
+  accepted any two stamps on the same UTC day, so a 09:30 quote was "current"
+  at 15:59, and a quote stamped *after* the decision was accepted because its
+  day matched. It now compares timezone-aware instants and enforces three
+  rules: the quote must not post-date the decision, its age must fall within a
+  configurable window, and a naive or unparseable stamp fails closed. The
+  window is explicit — `intraday_quote_max_age_seconds`, defaulting to
+  `DEFAULT_INTRADAY_QUOTE_MAX_AGE_SECONDS` (300 s) — rather than a hidden
+  constant. An EOD close is not aged like a tick: it is dated by its session
+  and must belong to the decision's calendar day.
+
+- **The risk record did not add up.** `risk_per_share` was measured from the
+  trigger level (540) rather than the price the size was computed against
+  (550), and `stressed_risk_per_share` was `abs(entry - stop) / qty` — the
+  whole lot divided by its quantity, which shrinks as the size grows and was
+  never a per-share figure. It is now the nominal unit risk measured from the
+  sizing price, raised to the stressed unit risk when a size exists. The
+  authorised order reports the reference price the size used (550) and the
+  trigger level separately (540), so the audit never presents a level as a
+  fill.
+
+### Changed
+
+- `tests/test_fix5_review.py::TestTheCompiledGraphPropagate` is renamed
+  `TestThePropagateEntryPoint`: it mocks `graph.invoke`, so it exercises the
+  decision path around the graph, not the compiled graph. A genuine
+  `StateGraph` run is added in `test_fix5_final_review.py`.
+
+### Fixed — test fixtures
+
+- Several fixtures stamped an `EOD_CONFIRMED` bar at 13:00 New York. A settled
+  close cannot exist before 16:00: the bar is still forming. Those fixtures now
+  use an intraday print at 15:00, which is what a run during the session
+  actually reads, or a 16:00 close when the case is genuinely an end-of-day
+  one.
+
 ## [0.9.1] — 2026-11-11
 
 ### Fixed
