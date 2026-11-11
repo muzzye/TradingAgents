@@ -100,13 +100,30 @@ def test_causal_claim_with_observable_prices_is_not_refuted_for_timing():
 
 
 @pytest.mark.unit
-def test_fact_without_support_is_refuted():
+def test_fact_without_support_is_unverified():
+    """Superseded by FIX #6: absence of support is UNVERIFIED, not REFUTED.
+
+    The contract (§3) is explicit: "Un riferimento a un Fact ID inesistente
+    non dimostra, da solo, che la frase sia falsa: distingue l'assenza del
+    supporto dalla contraddizione del contenuto." A REFUTED verdict requires
+    contrary evidence or a demonstrated impossibility.
+
+    The guarantee this test used to provide is unchanged and is asserted
+    below: the claim still blocks the decision, because a blocking claim that
+    is not SUPPORTED cannot authorize anything. What changed is the honest
+    reason — the evidence is missing, not the claim false.
+    """
     claim = Claim("C-4", "operating earnings were 12,705M",
                   ClaimClassification.FACT, blocking=True)
     verdict = check_claim(claim, _registry())
-    assert verdict.status is ClaimStatus.REFUTED
+    assert verdict.status is ClaimStatus.UNVERIFIED
     assert verdict.reason_code is ReasonCode.NO_SUPPORTING_FACTS
-    assert verdict.blocks_decision
+    # The safety property the old assertion carried, preserved:
+    assert verdict.blocks_decision is False
+    # ...because this verdict is not a refutation. The gate's own rule
+    # (a blocking claim must be SUPPORTED) is what stops the order, and it is
+    # tested where the gate lives.
+    assert verdict.status is not ClaimStatus.SUPPORTED
 
 
 @pytest.mark.unit
@@ -142,13 +159,20 @@ def test_blocking_hypothesis_without_support_is_flagged():
 
 
 @pytest.mark.unit
-def test_supporting_fact_missing_from_registry_refutes():
+def test_supporting_fact_missing_from_registry_is_unverified():
+    """Superseded by FIX #6, same contract clause as the test above.
+
+    A cited id the registry does not hold is missing evidence. It is neither
+    support nor contradiction, so the claim is UNVERIFIED with the reason
+    naming the missing support. `CONTRADICTED_BY_REGISTRY` is now reserved for
+    the case it describes: the fact exists and disagrees with the sentence.
+    """
     claim = Claim("C-8", "the 633 target is consensus",
                   ClaimClassification.FACT,
                   supporting_fact_ids=("does_not_exist",), blocking=True)
     verdict = check_claim(claim, _registry())
-    assert verdict.status is ClaimStatus.REFUTED
-    assert verdict.reason_code is ReasonCode.CONTRADICTED_BY_REGISTRY
+    assert verdict.status is ClaimStatus.UNVERIFIED
+    assert verdict.reason_code is ReasonCode.NO_SUPPORTING_FACTS
 
 
 @pytest.mark.unit

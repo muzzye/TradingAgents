@@ -484,6 +484,42 @@ def evaluate_decision(
         math_reasons = tuple(dict.fromkeys(
             tuple(math_reasons) + (GateReason.SEC_REVENUE_CLAIM_MISMATCH,)))
 
+    # FIX #6: the Fact Checker, wired where the reports and the run's certified
+    # metrics coexist. It cannot live in the Data Quality node — that runs in
+    # parallel with the analysts, so the reports are empty when it executes,
+    # the same reason the revenue reconciliation moved here.
+    #
+    # Every failure mode is closed:
+    #   - a refuted *or unverified* blocking claim blocks;
+    #   - a checker exception blocks (I5: an error is not a PASS);
+    #   - a claim contradicting its own cited evidence blocks.
+    fact_check_report = None
+    fact_check_audit = None
+    try:
+        from tradingagents.dataflows.fact_check_integration import (
+            check_production_claims,
+            claims_for_audit,
+        )
+
+        fact_check_report, claim_collection = check_production_claims(
+            reports_to_check, metric_registry,
+            snapshot_id=snapshot_id,
+            post_event_status=(causal.status if causal is not None else None),
+        )
+        fact_check_audit = claims_for_audit(fact_check_report, claim_collection)
+        if fact_check_report.blocks_decision:
+            data_quality_blocked = True
+            math_reasons = tuple(dict.fromkeys(
+                tuple(math_reasons) + (GateReason.FACT_CHECK_BLOCKED,)))
+    except Exception:  # noqa: BLE001 — fail closed, never a silent pass
+        logger.exception("Fact Checker failed for %s on %s", ticker, trade_date)
+        fact_check_report = None
+        fact_check_audit = {"checked": False,
+                            "error": "the fact checker raised"}
+        data_quality_blocked = True
+        math_reasons = tuple(dict.fromkeys(
+            tuple(math_reasons) + (GateReason.FACT_CHECK_FAILED,)))
+
     # §4: an executable decision must rest on at least one certified metric.
     # Without a registry — or with one that certified nothing — the gate cannot
     # say the plan's numbers hold up, so it must not propose an order. The
@@ -597,6 +633,10 @@ def evaluate_decision(
         )
     if arithmetic_verdicts:
         record.arithmetic_verdicts = arithmetic_verdicts
+    if fact_check_report is not None:
+        record.fact_check = fact_check_report
+    if fact_check_audit is not None:
+        record.fact_check_audit = fact_check_audit
     if entry_trigger is not None:
         # FIX #5: the verdict the decision actually rested on.
         record.entry_trigger = entry_trigger

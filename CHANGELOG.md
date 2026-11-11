@@ -19,6 +19,72 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-11
+
+### Added
+
+- **The Fact Checker runs in production.** It has existed since Phase 5 and the
+  graph has never called it: `FactCheckReport` appeared in `audit.py` and
+  `debate.py` only as a type, so `AuditRecord.fact_check` was always `None`. A
+  new adapter (`dataflows/fact_check_integration.py`) builds the evidence
+  registry from the run's own certified metrics, turns report sentences into
+  claims, and runs the checker where the reports and the registry coexist —
+  the gate, for the same reason the revenue reconciliation lives there: the
+  Data Quality node runs in parallel with the analysts and sees empty reports.
+
+  Claims are collected only when they name a metric the run certified *and that
+  metric is usable*. A figure about something uncertified is recorded as
+  context, never blocking.
+
+- **A verdict reaches the decision and the audit.** `FACT_CHECK_BLOCKED` when a
+  material claim is contradicted, `FACT_CHECK_FAILED` when the checker itself
+  raises — the second is a block, not a pass, because an unchecked decision is
+  not a verified one. `execution` gains `fact_check`, distinguishing
+  `checked: true` from `checked: false`.
+
+### Fixed
+
+- **A verified fact id certified any sentence citing it.** `check_claim()`
+  confirmed the fact existed and was verified, then returned SUPPORTED without
+  reading what the sentence said. A report stating "Revenue was 74,322 million"
+  while citing a 105,647 million fact passed as supported. The sentence's own
+  figure is now compared to the fact's, scaled by the fact's unit
+  (`USD_million 12,705` and "12,705M" are the same quantity), with a 0.5%
+  tolerance for rounding. Dimensionless facts — a multiple, a percentage — are
+  compared only against a dimensionless figure in the text.
+
+- **A labelled hypothesis or forecast could be certified as fact.** Facts about
+  a claim's topic do not make a projection true. `HYPOTHESIS`, `FORECAST` and
+  `UNSUPPORTED` are now always `UNVERIFIED`, with `NOT_A_FACT` as the reason.
+
+- **Absence of support was treated as contradiction.** A `FACT` with no cited
+  evidence, or citing an id the registry did not hold, came back `REFUTED`.
+  Contract §3 is explicit that a missing reference does not show a sentence is
+  false: the distinction is between missing support and contradictory content.
+  Both cases are now `UNVERIFIED` with `NO_SUPPORTING_FACTS`; `REFUTED` is
+  reserved for evidence that actually disagrees. The safety is unchanged — a
+  material claim that is not `SUPPORTED` still cannot authorize an order —
+  but the audit now says which of the two happened.
+
+### Changed
+
+- `FactCheckReport.blocks_decision` is true when a blocking claim is refuted
+  **or** unverified, and `unverified_blocking_claim_ids` keeps the two apart
+  for the audit.
+- Two tests that asserted the superseded `REFUTED` semantics were updated with
+  the contract clause that supersedes them, as §9 requires.
+
+### Known limitation — not fixed here
+
+- **`pe_trailing` is not certifiable in production.** `AgentState` does not
+  declare `eps_ttm` or `weighted_average_shares`, so a compiled graph drops them
+  between nodes and `registry_inputs_from_state` always finds `None`. Measured
+  on a real shape of run state: `price_to_book` and `consolidated_revenue`
+  certify, `pe_trailing` and `eps_gaap` are `NOT_COMPUTABLE`. Declaring the keys
+  is a one-line change, but wiring the agents to populate them is not, and it
+  belongs to its own fix rather than this one. The Fact Checker therefore has no
+  P/E evidence to compare against; claims about it are collected as context.
+
 ## [0.9.4] — 2026-11-11
 
 ### Fixed
