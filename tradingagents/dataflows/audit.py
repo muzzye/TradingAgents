@@ -259,6 +259,14 @@ class AuditRecord:
         trigger = self.entry_trigger
         if trigger is not None and hasattr(trigger, "summary"):
             entry["entry_trigger"] = trigger.summary()
+        # FIX #5 review (B): the two prices are different numbers and the audit
+        # must show both — the level the plan had to clear, and the price the
+        # size was actually computed against.
+        sizing = self.exposure_sizing
+        if sizing is not None:
+            entry["risk_sizing_price"] = getattr(sizing, "entry", None)
+            if trigger is not None:
+                entry["trigger_level"] = getattr(trigger, "entry_level", None)
         # P0-D: the structured verdict, alongside the gate's raw action.
         verdict = self.execution_verdict
         if verdict is not None:

@@ -555,34 +555,70 @@ class TradingAgentsGraph:
                 final_state.get("company_of_interest"), trade_date)
             return None
 
-    def _market_open_at(self, final_state: dict, trade_date: str) -> bool:
-        """FIX #5: the session state, derived rather than assumed (contract §4).
+    def _market_open_at(self, final_state: dict, trade_date: str,
+                        decision_as_of: str | None = None) -> bool:
+        """FIX #5: whether the session is open *now*, i.e. when deciding.
 
-        `market_open=True` was a default, so every run behaved as if the market
-        were open. Here the status comes from the snapshot's own timestamp; a
-        missing or unreadable stamp yields False, and a closed market turns the
-        decision into WAIT with MARKET_CLOSED rather than a proposal.
+        Reading the quote's own timestamp answered the wrong question: it says
+        whether the market was open when the price was observed, not whether it
+        is open when the order would be sent. A 13:00 quote and a 16:05
+        decision is a closed market, and the earlier version called it open.
+
+        Two separate questions, deliberately not merged:
+
+        - **session**: is the decision moment inside a trading session? The
+          exchange calendar answers this, including holidays, early closes and
+          years it does not cover (which read as closed — an unknown schedule
+          cannot certify that a session is open).
+        - **freshness**: is the quote recent enough to act on? A verified price
+          from three days ago is not a current quote. An EOD close is dated by
+          its session; an intraday quote must be from the same session as the
+          decision.
+
+        ``decision_as_of`` is injectable so tests can freeze the clock; it
+        defaults to the current UTC instant.
         """
         try:
+            from datetime import UTC, datetime
+
             from tradingagents.dataflows.math.session import (
                 SessionStatus,
                 market_session_status,
             )
 
             snapshot = final_state.get("verified_market_snapshot") or {}
-            stamp = snapshot.get("price_as_of")
-            if not stamp:
-                provenance = snapshot.get("price_provenance") or {}
-                stamp = provenance.get("timestamp")
-            if not stamp:
+            provenance = snapshot.get("price_provenance") or {}
+            quote_stamp = snapshot.get("price_as_of") or provenance.get(
+                "timestamp")
+            if not quote_stamp:
                 return False
-            return market_session_status(stamp) is SessionStatus.OPEN
+
+            moment = decision_as_of or datetime.now(UTC).isoformat()
+            if market_session_status(moment) is not SessionStatus.OPEN:
+                return False
+            # The market is open at decision time; the quote must belong to
+            # the same session, or it is history rather than a quote.
+            return self._quote_is_current(quote_stamp, moment, provenance)
         except Exception:  # noqa: BLE001 — never assume open on a failure
             logger.exception("Market-session check failed for %s", trade_date)
             return False
 
+    @staticmethod
+    def _quote_is_current(quote_stamp: str, decision_as_of: str,
+                          provenance: dict) -> bool:
+        """Whether a verified quote is fresh enough to act on at ``decision_as_of``.
+
+        Compared by calendar day in UTC: a same-day quote is current, an older
+        one is stale. An EOD close is dated by its session, so a Friday close
+        read on Saturday is stale even though nothing changed.
+        """
+        quote_day = str(quote_stamp)[:10]
+        decision_day = str(decision_as_of)[:10]
+        return quote_day == decision_day
+
     def _evaluate_reliability(self, company_name, trade_date, final_state,
-                              portfolio=None, run_registry=None):
+                              portfolio=None, run_registry=None,
+                              decision_as_of=None):
         """Run the decision through the Execution Gate and write the audit.
 
         Best-effort by design: a reliability-layer failure must not lose the
@@ -624,7 +660,8 @@ class TradingAgentsGraph:
         # False meant this path could only ever emit WAIT and
         # PROPOSE_PAPER_ORDER was unreachable.
         trigger = self._evaluate_entry_trigger(final_state, trade_date)
-        market_open = self._market_open_at(final_state, trade_date)
+        market_open = self._market_open_at(final_state, trade_date,
+                                           decision_as_of=decision_as_of)
         try:
             record, decision = evaluate_decision(
                 company_name, trade_date, final_state,
@@ -638,6 +675,7 @@ class TradingAgentsGraph:
                 metric_registry=registry,
                 entry_trigger=trigger,
                 market_open=market_open,
+                decision_as_of=decision_as_of,
                 price_snapshot=final_state.get("verified_market_snapshot"),
                 **_portfolio_sizing_inputs(self.config, portfolio, company_name),
             )

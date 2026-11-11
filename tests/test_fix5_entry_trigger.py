@@ -267,7 +267,8 @@ class TestTheGraphEvaluatesIt:
     def test_an_open_session_reads_open(self, tmp_path):
         graph = self._graph(tmp_path)
         assert graph._market_open_at(
-            {"verified_market_snapshot": _snapshot()}, TRADE_DATE) is True
+            {"verified_market_snapshot": _snapshot()}, TRADE_DATE,
+            decision_as_of=SESSION_STAMP) is True
 
     def test_no_timestamp_is_not_an_open_market(self, tmp_path):
         graph = self._graph(tmp_path)
@@ -581,7 +582,9 @@ class TestTheWholePathThroughTheGraph:
             "market_report": "", "news_report": "", "sentiment_report": "",
             "eps_ttm": 2.0, "weighted_average_shares": 1e9,
         }
-        graph._evaluate_reliability(TICKER, TRADE_DATE, state, portfolio=_Book())
+        graph._evaluate_reliability(
+            TICKER, TRADE_DATE, state, portfolio=_Book(),
+            decision_as_of=self.STAMP)
         audit = json.loads(next(pathlib.Path(tmp_path).rglob("audit_*.json")).read_text())
         return audit["execution"]
 
@@ -659,7 +662,9 @@ class TestTheWholePathThroughTheGraph:
             "market_report": "", "news_report": "", "sentiment_report": "",
             "eps_ttm": 2.0, "weighted_average_shares": 1e9,
         }
-        graph._evaluate_reliability(TICKER, TRADE_DATE, state, portfolio=_Book())
+        graph._evaluate_reliability(
+            TICKER, TRADE_DATE, state, portfolio=_Book(),
+            decision_as_of=f"{TRADE_DATE}T02:00:00+00:00")
         execution = json.loads(
             next(pathlib.Path(tmp_path).rglob("audit_*.json")).read_text())["execution"]
         assert execution["action"] == "WAIT"

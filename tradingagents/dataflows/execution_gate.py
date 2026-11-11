@@ -58,6 +58,10 @@ class GateReason(StrEnum):
     PORTFOLIO_RISK_BUDGET_MISSING = "PORTFOLIO_RISK_BUDGET_MISSING"
     PORTFOLIO_RISK_BUDGET_EXCEEDED = "PORTFOLIO_RISK_BUDGET_EXCEEDED"
     RISK_PLAN_BLOCKED = "RISK_PLAN_BLOCKED"
+    # FIX #5 review (A): the plan is missing an input the sizing needs, so no
+    # quantity can exist. Distinct from RISK_PLAN_BLOCKED, which means a plan
+    # that did carry its numbers failed a check.
+    RISK_PLAN_INCOMPLETE = "RISK_PLAN_INCOMPLETE"
     DATA_QUALITY_BLOCKED = "DATA_QUALITY_BLOCKED"
     STALE_SIGNAL = "STALE_SIGNAL"
     MARKET_CLOSED = "MARKET_CLOSED"
@@ -231,14 +235,26 @@ def evaluate_plan(plan: PlanInput) -> GateDecision:
     return GateDecision(ExecutionAction.WAIT, (GateReason.NO_TRIGGER,), plan.ticker)
 
 
-def _risk_reason_mapping(risk_reasons: tuple[RiskReason, ...]) -> tuple[GateReason, ...]:
-    """Map the risk engine's reasons onto gate reasons for the audit trail."""
+def _risk_reason_mapping(risk_reasons) -> tuple[GateReason, ...]:
+    """Map the risk engine's reasons onto gate reasons for the audit trail.
+
+    A reason that is *already* a ``GateReason`` passes through unchanged: the
+    gate raises some checks itself (an incomplete risk plan, a wrong-side
+    stop) and dropping them here would leave the decision blocked with no
+    code saying why.
+    """
     mapping = {
         RiskReason.RISK_BUDGET_MISSING: GateReason.PORTFOLIO_RISK_BUDGET_MISSING,
         RiskReason.PORTFOLIO_CONTEXT_MISSING: GateReason.PORTFOLIO_RISK_BUDGET_MISSING,
         RiskReason.RISK_BUDGET_EXCEEDED: GateReason.PORTFOLIO_RISK_BUDGET_EXCEEDED,
     }
-    return tuple(mapping[r] for r in risk_reasons if r in mapping)
+    out = []
+    for reason in risk_reasons:
+        if isinstance(reason, GateReason):
+            out.append(reason)
+        elif reason in mapping:
+            out.append(mapping[reason])
+    return tuple(dict.fromkeys(out))
 
 
 # ---------------------------------------------------------------------------

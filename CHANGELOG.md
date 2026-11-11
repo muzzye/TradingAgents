@@ -19,6 +19,51 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-11-11
+
+### Fixed
+
+- **A met trigger with an incomplete risk plan could still propose.** The risk
+  block ran only when entry, stop *and* ATR were all present, so a plan missing
+  one of them skipped sizing entirely and left the verdict "not blocked" — the
+  gate could then propose a quantity nobody had validated. An incomplete risk
+  plan is now `BLOCK` with `RISK_PLAN_INCOMPLETE`, a code distinct from
+  `RISK_PLAN_BLOCKED` (a plan that carried its numbers and failed a check).
+  `_risk_reason_mapping` passes an existing `GateReason` through instead of
+  dropping it, so the code reaches the audit.
+
+- **Sizing used the trigger level, not the price the order would fill at.** A
+  breakout LONG whose level was 540 while the market trades 550 fills near 550.
+  Sizing 50 shares on 540 with a 520 stop reports 1,000 of risk; the same 50
+  shares bought at 550 risk 1,500 before gap and slippage. `executable_price()`
+  now yields the price the order can realistically get — the worse of observed
+  and level for a market order, the limit for a pullback — and sizing, stop,
+  cash, exposure and stress all use it. A limit buy above its own limit yields
+  no prudent price and therefore no proposal. The audit records
+  `execution.risk_sizing_price` and `execution.trigger_level` separately.
+
+- **The session was checked at the quote's timestamp, not at the decision's.**
+  `_market_open_at` asked whether the market was open when the price was
+  observed, so a 13:00 quote and a 16:05 decision read as OPEN. It now takes an
+  injectable `decision_as_of` and asks the question at that instant. Freshness
+  is a separate check: the quote must share the decision's calendar day.
+
+### Fixed — pre-existing, found while writing the tests
+
+- **`market_session_status` ignored the exchange calendar.** It consulted only
+  the weekday, so Thanksgiving 2026-11-26 and the early close on 2026-11-27 read
+  as `OPEN`. It now asks `session_day()`: a holiday is `CLOSED`, an early close
+  ends at 13:00 New York, and a year the calendar does not describe is `CLOSED`
+  too — an unknown schedule cannot certify that a session is open. This affects
+  every caller of the function, not only the trigger.
+
+### Changed
+
+- `ExposureSizingResult` carries `entry`, the price the size was computed
+  against, so a reader can see which number produced the quantity.
+- `evaluate_decision()` and `_evaluate_reliability()` accept `decision_as_of`,
+  injectable so tests can freeze the clock.
+
 ## [0.9.0] — 2026-11-11
 
 ### Added

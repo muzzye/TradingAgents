@@ -219,6 +219,40 @@ def evaluate_entry_trigger(
     return verdict
 
 
+def executable_price(verdict: TriggerVerdict, *,
+                     direction: str = "LONG") -> float | None:
+    """The price an order would realistically fill at, for sizing.
+
+    The trigger level is not the fill price. A breakout LONG whose level was
+    540 while the market trades 550 fills near 550, so sizing on 540
+    understates the risk: 50 shares with a 520 stop risk 1,000 at 540 but
+    1,500 at 550, before gap and slippage.
+
+    The rule is "the worse of the two, from the position's point of view":
+
+    - a LONG pays at least the observed price, and at least the trigger level
+      it had to clear — so the larger;
+    - a SHORT sells at most the observed price, and at most its trigger — so
+      the smaller.
+
+    A ``PULLBACK`` is a limit order: it fills at the limit or better, never
+    above it for a LONG, so the limit caps the price rather than the market
+    raising it. Using the observed price when it is *better* than the limit
+    would size on a price the order cannot have.
+    """
+    if verdict.observed_price is None or verdict.entry_level is None:
+        return None
+    observed = float(verdict.observed_price)
+    level = float(verdict.entry_level)
+
+    if verdict.mode is EntryMode.PULLBACK:
+        # A limit caps the fill. LONG: never above the limit. SHORT: never
+        # below it.
+        return min(observed, level) if direction == "LONG" else max(observed, level)
+    # A market/breakout order pays what the market offers.
+    return max(observed, level) if direction == "LONG" else min(observed, level)
+
+
 def _coerce_mode(mode: EntryMode | str | None) -> EntryMode:
     if isinstance(mode, EntryMode):
         return mode

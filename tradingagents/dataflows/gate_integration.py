@@ -155,6 +155,10 @@ def evaluate_decision(
     # that already knows the answer may still pass `trigger_met` alone; the
     # production path passes the verdict.
     entry_trigger=None,
+    # FIX #5 review (C): the instant the decision is finalised, injectable so a
+    # test can freeze the clock. Distinct from the quote's timestamp: the
+    # session that matters is the one at decision time.
+    decision_as_of: str | None = None,
     market_open: bool = True,
     # P0 data-quality inputs (all optional; absent checks are not guessed).
     fundamentals_filings: list | None = None,
@@ -242,7 +246,23 @@ def evaluate_decision(
     risk_blocked = False
     risk_reasons = ()
     sizing = None
-    if eff_entry is not None and eff_stop is not None and eff_atr is not None:
+
+    # FIX #5 review (A): a met trigger is permission to act, not a size. Without
+    # entry, stop and ATR the engine cannot compute one, and the guard below
+    # used to skip the whole block — so the risk verdict stayed "not blocked"
+    # and the gate could propose a quantity nobody had validated. An incomplete
+    # risk plan is now a BLOCK with its own code, distinct from the sizing
+    # engine's own reasons (which speak about budget and portfolio).
+    missing_risk_inputs = [
+        name for name, value in (("entry", eff_entry), ("stop", eff_stop),
+                                 ("atr", eff_atr))
+        if value is None
+    ]
+    if missing_risk_inputs:
+        risk_blocked = True
+        risk_reasons = risk_reasons + (GateReason.RISK_PLAN_INCOMPLETE,)
+
+    if not missing_risk_inputs:
         # The ATR-buffer check uses the absolute distance so a SHORT plan's
         # stop above the entry is measured by the same rule; the side check
         # below (validate_stop_side) enforces the direction itself.
@@ -278,9 +298,37 @@ def evaluate_decision(
             # itself (`RISK_BUDGET_MISSING`, `PORTFOLIO_CONTEXT_MISSING`), so
             # a plan that could not be quantified is refused for *that*
             # cause and not for one it happens to share with a valid plan.
+            # FIX #5 review (B): size on the price the order would fill at,
+            # not on the trigger level. For a breakout already past its level
+            # the market price is higher, and sizing on the level understates
+            # the risk: 50 shares at 540 with a 520 stop risk 1,000, but the
+            # same shares bought at 550 risk 1,500 before gap and slippage.
+            sizing_entry = eff_entry
+            if entry_trigger is not None:
+                from tradingagents.dataflows.math.entry_trigger import (
+                    executable_price,
+                )
+
+                candidate = executable_price(entry_trigger,
+                                             direction=eff_direction)
+                if candidate is None:
+                    # No prudent price. But *why* matters: an ambiguous or
+                    # unevaluable trigger is a "not yet" condition the gate
+                    # already reports as a WAIT, and blocking it here would
+                    # turn a plan that simply is not ready into a
+                    # contradiction. Only a trigger the evaluator *met* — and
+                    # which therefore claims a fill — without yielding a price
+                    # is a genuine plan defect.
+                    if getattr(entry_trigger, "met", False):
+                        risk_blocked = True
+                        risk_reasons = risk_reasons + (
+                            GateReason.RISK_PLAN_INCOMPLETE,)
+                else:
+                    sizing_entry = candidate
+
             if not risk_blocked:
                 sizing = size_with_exposure_cap(
-                    entry=eff_entry, stop=eff_stop, atr=eff_atr,
+                    entry=sizing_entry, stop=eff_stop, atr=eff_atr,
                     risk_budget=risk_budget, equity=equity,
                     max_symbol_exposure=max_symbol_exposure,
                     direction=eff_direction, cash=cash,
