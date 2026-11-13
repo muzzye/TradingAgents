@@ -68,6 +68,9 @@ class GateReason(StrEnum):
     # FIX #6: the checker itself failed. Not a pass — an unchecked decision is
     # not a verified one (invariant I5).
     FACT_CHECK_FAILED = "FACT_CHECK_FAILED"
+    # FIX #7: the collector's sample was bounded, so some of a report was not
+    # examined. Not the same as a clean check.
+    FACT_CHECK_INCOMPLETE = "FACT_CHECK_INCOMPLETE"
     DATA_QUALITY_BLOCKED = "DATA_QUALITY_BLOCKED"
     STALE_SIGNAL = "STALE_SIGNAL"
     MARKET_CLOSED = "MARKET_CLOSED"

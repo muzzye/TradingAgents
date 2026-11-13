@@ -19,6 +19,60 @@ Istruzioni per l'agente AI:
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-11
+
+### Fixed
+
+- **Four of the seven decision sources were not checked at all.** FIX #6 wired
+  the Fact Checker to `market`, `fundamentals` and `news`. The four it left out
+  — `sentiment_report`, `investment_plan`, `trader_investment_plan` and
+  `final_trade_decision` — are exactly where a manager can introduce or repeat
+  a figure after the analysts have finished. Measured on `0.10.1`: a
+  `final_trade_decision` stating 74,322 million against a certified 105,647
+  produced `claims_total=0` and no block. All seven are now read, and the audit
+  records which (`sources_checked` / `sources_unchecked`).
+
+- **A critical unverifiable claim was filed as harmless context.** FIX #6 had
+  one bucket for everything it could not check, so a Trader's "entry at P/E
+  18.2x" — a valuation argument the trade rests on — vanished alongside an
+  unrelated figure. Three states now exist: `CLAIM_CHECKED` (evidence was
+  compared), `CLAIM_UNVERIFIABLE` (a metric this system certifies, with no
+  certified evidence for it) and `CONTEXT_ONLY` (a figure nothing here can
+  speak about). A material unverifiable claim blocks: a decision resting on an
+  unverified figure is not a verified decision.
+
+- **Metric recognition missed the commonest phrasings.** `P/E 18.2x`,
+  `PE 18.2x`, `PER 18,2`, `EPS 39.76` and `SMA200 at 497` were all
+  unrecognised, so sentences about them were never checked. Worse, `Total
+  revenue was 105,647 million` was filed as context *while the metric was in
+  the registry*. The phrase map now covers the plain forms, and forward or
+  historical qualifiers are excluded by reusing the numeric-claims checker's
+  own patterns rather than re-implementing them — which is what keeps
+  `P/E 18.2x, forward` from being refuted against the trailing metric.
+
+- **A report past the extraction cap was silently sampled.** `MAX_CLAIMS_PER_REPORT`
+  bounded the work, but nothing said the check was partial. A report is now
+  marked `truncated` with a reason and a count of the sentences beyond the cap,
+  and the gate raises `FACT_CHECK_INCOMPLETE` — a bounded sample is not a
+  complete check. The cap also applies unconditionally: an earlier attempt let
+  material claims through it, which a pathological report could use to defeat
+  the limit entirely.
+
+### Changed
+
+- The audit carries the per-sentence record (`statements`), the sources read
+  (`sources_checked`), the material claims that could not be verified
+  (`unverifiable_material`) and the truncation state, so a reader can tell a
+  checked claim from an unverifiable one from an irrelevant figure.
+
+### Known limitation — unchanged
+
+- `AgentState` still does not declare `eps_ttm` or `weighted_average_shares`, so
+  `pe_trailing` remains uncertifiable in production. FIX #7 makes that visible
+  rather than silent: a P/E claim is now `CLAIM_UNVERIFIABLE` and blocks,
+  instead of disappearing into context. Closing the gap needs the agents wired
+  to populate those figures, which is its own fix.
+
 ## [0.10.1] — 2026-11-11
 
 ### Added
